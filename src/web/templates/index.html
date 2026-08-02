@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>News Shorts Library</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% if has_running or has_uploading %}
+  <meta http-equiv="refresh" content="15">
+  {% endif %}
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <h1>News Shorts Library</h1>
+      <p class="subtitle">Top news → one vertical Short each{% if youtube_enabled %} · YouTube upload on{% endif %}</p>
+    </div>
+    <div class="header-actions">
+      <label class="toggle">
+        <input type="checkbox" id="mock-toggle">
+        <span>Mock data</span>
+      </label>
+    </div>
+  </header>
+
+  <section class="cards">
+    <div class="card">
+      <div class="card-value">{{ stats.today_success }}</div>
+      <div class="card-label">Shorts today</div>
+    </div>
+    <div class="card warning">
+      <div class="card-value">{{ stats.running }}</div>
+      <div class="card-label">Running</div>
+    </div>
+    <div class="card danger">
+      <div class="card-value">{{ stats.today_failed }}</div>
+      <div class="card-label">Failed today</div>
+    </div>
+    <div class="card">
+      <div class="card-value">{{ stats.uploading or 0 }}</div>
+      <div class="card-label">Uploading</div>
+    </div>
+  </section>
+
+  <section class="panel generate-panel">
+    <div class="panel-head">
+      <h2>Generate Shorts</h2>
+      <p class="hint">
+        Each section fetches top headlines (<code>news_count</code>, default 5)
+        into one Short. Title: <code>Top Entertainment August 2, 2026</code>.
+        Scheduled daily at <strong>10:00 PM local</strong> per section timezone.
+        {% if youtube_enabled %}
+        Auto-uploads to the same YouTube channel as the trends pipeline when auth is configured.
+        {% endif %}
+      </p>
+    </div>
+    <div class="trigger-row">
+      {% for section in sections %}
+      <button class="btn" onclick="triggerRun('{{ section.code }}')">
+        Generate {{ section.name }} ({{ section.news_count }} news)
+      </button>
+      {% endfor %}
+      <button class="btn btn-secondary" onclick="triggerAll()">Generate all</button>
+    </div>
+    <p id="trigger-status" class="hint"></p>
+  </section>
+
+  <section class="panel filters-panel">
+    <form method="get" class="filters" id="filter-form">
+      <div class="filter-group">
+        <span class="filter-label">Section</span>
+        <div class="chips">
+          <a class="chip {% if not filter_section %}active{% endif %}"
+             href="/?{% if filter_date %}date={{ filter_date }}{% endif %}">All</a>
+          {% for section in sections %}
+          <a class="chip {% if filter_section == section.code %}active{% endif %}"
+             href="/?section={{ section.code }}{% if filter_date %}&date={{ filter_date }}{% endif %}">
+            {{ section.name }}
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label" for="date">Date</label>
+        <select name="date" id="date" onchange="this.form.submit()">
+          <option value="">All dates</option>
+          {% for d in available_dates %}
+          <option value="{{ d }}" {% if filter_date == d %}selected{% endif %}>{{ d }}</option>
+          {% endfor %}
+        </select>
+        {% if filter_section %}
+        <input type="hidden" name="section" value="{{ filter_section }}">
+        {% endif %}
+      </div>
+    </form>
+  </section>
+
+  {% if next_runs %}
+  <section class="panel schedule-panel">
+    <h2>Next scheduled (10:00 PM local)</h2>
+    <ul class="schedule-list">
+      {% for item in next_runs %}
+      <li><strong>{{ item.section_code }}</strong> {{ item.period }} — {{ item.next_run }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <section class="library">
+    {% for group in groups %}
+    <div class="date-group">
+      <h2 class="date-heading">{{ group.date }}</h2>
+      <div class="video-grid">
+        {% for run in group.runs %}
+        <article class="video-card">
+          <div class="video-card-top">
+            <div>
+              <h3>{{ run.video_title }}</h3>
+              <p class="meta">
+                {{ run.section_name or run.section_code }} · #{{ run.id }}
+                {% if run.batch_label %} · {{ run.batch_label }}{% endif %}
+              </p>
+            </div>
+            <span class="badge badge-{{ run.display_status }}">{{ run.display_status }}</span>
+          </div>
+          <div class="video-meta">
+            <span>Short</span>
+            <span>{{ run.duration }}</span>
+          </div>
+          {% if run.has_video %}
+          <video class="thumb-player" controls preload="metadata" src="/videos/{{ run.id }}/file"></video>
+          {% elif run.status == 'running' %}
+          <div class="placeholder">Generating…</div>
+          {% elif run.display_status == 'missing' %}
+          <div class="placeholder failed">File missing on disk — safe to Delete</div>
+          {% elif run.status == 'failed' %}
+          <div class="placeholder failed">Failed — see details</div>
+          {% else %}
+          <div class="placeholder">No video file</div>
+          {% endif %}
+          {% if run.is_uploaded and run.youtube_url %}
+          <p class="meta yt-link"><a href="{{ run.youtube_url }}" target="_blank" rel="noopener">Watch on YouTube</a></p>
+          {% elif run.upload_status == 'failed' and run.upload_error %}
+          <p class="meta upload-error">Upload failed — retry below</p>
+          {% elif run.upload_status == 'uploading' %}
+          <p class="meta">Uploading to YouTube…</p>
+          {% endif %}
+          <div class="card-actions">
+            {% if run.has_video %}
+            <a class="btn btn-small" href="/videos/{{ run.id }}/file">Play</a>
+            <a class="btn btn-small btn-secondary" href="/videos/{{ run.id }}/download">Download</a>
+            {% if run.can_upload and run.upload_status != 'uploading' %}
+            <button type="button" class="btn btn-small btn-upload" onclick="uploadRun({{ run.id }})">{{ run.upload_label }}</button>
+            {% endif %}
+            {% endif %}
+            <a class="btn btn-small btn-ghost" href="/runs/{{ run.id }}">Details</a>
+            {% if run.status != 'running' and run.upload_status != 'uploading' %}
+            <button type="button" class="btn btn-small btn-danger" onclick='deleteRun({{ run.id }}, {{ run.video_title|tojson }})'>Delete</button>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+    </div>
+    {% else %}
+    <div class="empty-state panel">
+      <h2>No Shorts yet</h2>
+      <p>Generate Technology, Entertainment, Global, or Business above. Files land under <code>output/YYYY-MM-DD/section/run_id/</code>.</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  <script>
+    async function triggerRun(code) {
+      const status = document.getElementById('trigger-status');
+      const mock = document.getElementById('mock-toggle').checked;
+      status.textContent = `Starting ${code} batch…`;
+      try {
+        const res = await fetch(`/api/trigger/${code}?mock=${mock}`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          status.textContent = `${code}: started (${data.news_count || ''} news). Refreshing…`;
+          setTimeout(() => location.reload(), 1500);
+        } else {
+          status.textContent = data.detail || 'Failed to start run';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function triggerAll() {
+      const status = document.getElementById('trigger-status');
+      const mock = document.getElementById('mock-toggle').checked;
+      status.textContent = 'Starting all sections…';
+      try {
+        const res = await fetch(`/api/trigger-all?mock=${mock}`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          status.textContent = 'All sections started. Refreshing…';
+          setTimeout(() => location.reload(), 1500);
+        } else {
+          status.textContent = data.detail || 'Failed to start';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function deleteRun(id, title) {
+      const label = title || ('run #' + id);
+      if (!confirm('Permanently delete "' + label + '" from disk and the dashboard? This cannot be undone.')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/runs/' + id, { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok) {
+          location.reload();
+        } else {
+          alert(data.detail || 'Delete failed');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function uploadRun(id) {
+      try {
+        const res = await fetch('/api/runs/' + id + '/upload', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          location.reload();
+        } else {
+          alert(data.detail || 'Upload failed to start');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+  </script>
+</body>
+</html>

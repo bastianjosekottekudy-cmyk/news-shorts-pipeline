@@ -1,0 +1,40 @@
+max_images_per_short: 4
+max_video_duration_sec: 58   # under YouTube Shorts limit
+target_duration_sec: 50
+
+web:
+  host: 127.0.0.1
+  port: 8081
+
+video:
+  width: 1080
+  height: 1920
+  target_duration_sec: 50
+  fps: 24
+  format: mp4
+  # auto = use NVIDIA NVENC when available, else libx264
+  codec: auto
+
+tts:
+  provider: edge-tts
+  rate: "-8%"
+  segment_pause_sec: 0.35
+  voice_map:
+    en: en-US-JennyNeural
+
+script:
+  provider: groq   # groq | template
+  model: llama-3.1-8b-instant
+  style: punchy YouTube Shorts news roundup host; natural spoken pacing; no invented facts
+  intro_template: "Here are today's top {n} {section} stories."
+  outro_template: "Thanks for watching. Follow for more news Shorts."
+
+images:
+  providers: [news_og, wikimedia, openverse]
+
+# Same YouTube channel as trends-video-pipeline — use shared secrets/
+youtube:
+  enabled: true
+  category_id: "25"
+  privacy: public
+  made_for_kids: false
