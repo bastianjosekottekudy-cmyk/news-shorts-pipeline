@@ -20,8 +20,10 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 WORDS_PER_SEC = 2.2
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+# Publisher tails like " - BBC" / " | Reuters" — MUST have whitespace around
+# the delimiter so we never chop hyphenated words (anti-government → anti).
 _SOURCE_TAIL_RE = re.compile(
-    r"(?:\s*[\|\-–—]\s*|\s{2,})"
+    r"(?:\s+[\|\-–—]\s+|\s{2,})"
     r"[A-Za-z0-9][A-Za-z0-9 .,&/'!]{0,50}$"
 )
 _ATTR_CRUMB_RE = re.compile(
@@ -53,6 +55,7 @@ def _clean_for_speech(text: str) -> str:
     cleaned = re.sub(r"\bnbsp\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"&[#a-zA-Z0-9]+;", " ", cleaned)
     cleaned = re.sub(r"[^\S\r\n]+", " ", cleaned)
+    # Trailing " - Outlet" / " | Outlet" only (spaces required around dash/pipe)
     cleaned = re.sub(
         r"\s+-\s+[A-Za-z0-9][A-Za-z0-9 .,&/'!]{0,50}$",
         "",
@@ -65,7 +68,9 @@ def _clean_for_speech(text: str) -> str:
     ).strip()
     for _ in range(2):
         cleaned = _SOURCE_TAIL_RE.sub("", cleaned).strip()
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,;:-\"'")
+    # Normalize unicode dashes inside words for clearer TTS (anti‑X → anti-X)
+    cleaned = cleaned.replace("\u2011", "-").replace("\u2013", "-").replace("\u2014", "-")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,;:\"'")
     return cleaned.strip()
 
 
