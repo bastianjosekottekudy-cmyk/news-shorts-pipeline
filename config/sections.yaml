@@ -50,3 +50,12 @@ sections:
     region: US
     timezone: America/New_York
     youtube_tags: [shorts, business, news]
+
+  - code: gaming
+    name: Gaming
+    search_query: "video games OR gaming OR PlayStation OR Xbox OR Nintendo OR Steam"
+    news_count: 5
+    language: en
+    region: US
+    timezone: America/New_York
+    youtube_tags: [shorts, gaming, games, news]
