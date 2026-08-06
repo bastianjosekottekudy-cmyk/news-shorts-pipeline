@@ -3,16 +3,17 @@
 # Fields:
 #   code           - short id used in output paths and API (e.g. tech)
 #   name           - Display name
-#   google_topic   - Google News topic (TECHNOLOGY, ENTERTAINMENT, WORLD, BUSINESS, …)
+#   google_topic   - Google News topic (TECHNOLOGY, ENTERTAINMENT, WORLD, BUSINESS, NATION, …)
 #   search_query   - optional; if set, uses RSS search instead of topic
 #   rss_url        - optional; full custom RSS URL overrides topic/search
 #   news_count     - how many headlines to fetch into the section Short (default 5)
-#   language       - narration language (maps to TTS voice in pipeline.yaml)
-#   region         - Google News gl / ceid region (e.g. US)
-#   timezone       - IANA timezone for daily 10pm schedule
+#   language       - always English (en) for narration + Google News hl
+#   region         - Google News gl / ceid region (e.g. US, GB, IN, CY)
+#   timezone       - IANA timezone for run dates (schedule is fixed to Asia/Kolkata)
 #   youtube_tags   - tags appended on upload
 #
 # Always produces exactly 1 Short per section covering all fetched headlines.
+# All sections run daily at 10:00 AM and 10:00 PM India Standard Time (Asia/Kolkata).
 
 sections:
   - code: tech
@@ -21,7 +22,7 @@ sections:
     news_count: 5
     language: en
     region: US
-    timezone: America/New_York
+    timezone: Asia/Kolkata
     youtube_tags: [shorts, tech, news, technology]
 
   - code: entertainment
@@ -30,7 +31,7 @@ sections:
     news_count: 5
     language: en
     region: US
-    timezone: America/New_York
+    timezone: Asia/Kolkata
     youtube_tags: [shorts, entertainment, news]
 
   - code: global
@@ -39,7 +40,7 @@ sections:
     news_count: 5
     language: en
     region: US
-    timezone: America/New_York
+    timezone: Asia/Kolkata
     youtube_tags: [shorts, world, news, global]
 
   - code: business
@@ -48,7 +49,7 @@ sections:
     news_count: 5
     language: en
     region: US
-    timezone: America/New_York
+    timezone: Asia/Kolkata
     youtube_tags: [shorts, business, news]
 
   - code: gaming
@@ -57,5 +58,41 @@ sections:
     news_count: 5
     language: en
     region: US
-    timezone: America/New_York
+    timezone: Asia/Kolkata
     youtube_tags: [shorts, gaming, games, news]
+
+  - code: us
+    name: US
+    google_topic: NATION
+    news_count: 5
+    language: en
+    region: US
+    timezone: Asia/Kolkata
+    youtube_tags: [shorts, us, america, news]
+
+  - code: uk
+    name: UK
+    google_topic: NATION
+    news_count: 5
+    language: en
+    region: GB
+    timezone: Asia/Kolkata
+    youtube_tags: [shorts, uk, britain, news]
+
+  - code: cyprus
+    name: Cyprus
+    search_query: "Cyprus OR Cypriot OR Nicosia OR Limassol"
+    news_count: 5
+    language: en
+    region: CY
+    timezone: Asia/Kolkata
+    youtube_tags: [shorts, cyprus, news]
+
+  - code: india
+    name: India
+    google_topic: NATION
+    news_count: 5
+    language: en
+    region: IN
+    timezone: Asia/Kolkata
+    youtube_tags: [shorts, india, news]

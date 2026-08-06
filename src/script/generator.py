@@ -17,7 +17,7 @@ from src.naming import sanitize_news_title
 logger = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-WORDS_PER_SEC = 2.2
+WORDS_PER_SEC = 2.35
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 # Publisher tails like " - BBC" / " | Reuters" — MUST have whitespace around
@@ -99,7 +99,7 @@ def _headline(item: dict[str, Any]) -> str:
 
 def _fact(item: dict[str, Any]) -> str:
     headline = _headline(item)
-    summary = _clean_for_speech(item.get("summary", ""))[:180]
+    summary = _clean_for_speech(item.get("summary", ""))[:320]
     if summary and len(summary) > 20 and summary.lower() != headline.lower():
         return summary
     return headline
@@ -128,12 +128,16 @@ def _template_segments(
     keywords: list[str] = []
     for idx, item in enumerate(news_items):
         opener = _OPENERS[min(idx, len(_OPENERS) - 1)]
+        headline = _headline(item)
         fact = _fact(item)
-        beat = f"{opener} {fact}"
+        if fact.lower() != headline.lower() and len(fact) > len(headline) + 10:
+            beat = f"{opener} {headline}. {fact}"
+        else:
+            beat = f"{opener} {fact}"
         if beat[-1] not in ".!?":
             beat += "."
         beats.append(_clean_for_speech(beat))
-        keywords.append(_headline(item))
+        keywords.append(headline)
     return {
         "intro": intro,
         "trends": beats,
@@ -149,18 +153,20 @@ def _build_prompt(
 ) -> str:
     style = load_pipeline_config().get("script", {}).get(
         "style",
-        "punchy YouTube Shorts news host; no invented facts",
+        "clear English YouTube Shorts news host; slightly descriptive; no invented facts",
     )
     lines = [
-        f"Write spoken narration for ONE vertical YouTube Short covering the top {len(news_items)} {section.name} news stories.",
+        f"Write spoken narration in English only for ONE vertical YouTube Short covering the top {len(news_items)} {section.name} news stories.",
         f"Style: {style}",
         f"Hard limit: under {max_words} words total.",
         "Only use the facts below. Do not invent details.",
         "Rules:",
-        "- Short intro naming the section and how many stories.",
+        "- Short English intro naming the section and how many stories.",
         f"- Exactly {len(news_items)} body beats — one per story, in order.",
+        "- Each beat should be 1–2 spoken sentences: who/what happened plus a short clarifying detail from the fact when available.",
+        "- Prefer plain descriptive wording over cryptic headline fragments.",
         "- Short CTA outro.",
-        "- Never include URLs or markdown.",
+        "- English only. Never include URLs or markdown.",
         "",
         "Return ONLY valid JSON:",
         '{ "intro": "...", "trends": ["beat1", "beat2", ...], "outro": "..." }',
@@ -186,9 +192,9 @@ def _call_groq(prompt: str, model: str, api_key: str) -> str:
             {
                 "role": "system",
                 "content": (
-                    "You write punchy YouTube Shorts news roundup narration. "
-                    "Stay factual. Never invent events. "
-                    "Reply with JSON only — no markdown fences."
+                    "You write clear, slightly descriptive English YouTube Shorts "
+                    "news roundup narration. Stay factual. Never invent events. "
+                    "Use English only. Reply with JSON only — no markdown fences."
                 ),
             },
             {"role": "user", "content": prompt},

@@ -63,7 +63,9 @@ def load_sections() -> list[Section]:
         raw["news_count"] = max(1, int(raw["news_count"]))
 
         raw.setdefault("language", "en")
+        raw["language"] = "en"
         raw.setdefault("region", "US")
+        raw.setdefault("timezone", "Asia/Kolkata")
         raw.setdefault("google_topic", "")
         raw.setdefault("search_query", "")
         raw.setdefault("rss_url", "")

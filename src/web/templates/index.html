@@ -48,9 +48,11 @@
       <p class="hint">
         Each section fetches top headlines (<code>news_count</code>, default 5)
         into one Short. Title: <code>Top Entertainment August 2, 2026</code>.
-        Scheduled daily at <strong>10:00 PM local</strong> per section timezone.
+        Scheduled daily at <strong>10:00 AM</strong> and <strong>10:00 PM India time</strong>
+        for every section. English headlines and narration only.
         {% if youtube_enabled %}
         Auto-uploads to the same YouTube channel as the trends pipeline when auth is configured.
+        Failed uploads are retried automatically every hour.
         {% endif %}
       </p>
     </div>
@@ -93,14 +95,32 @@
         {% endif %}
       </div>
     </form>
+    <div class="bulk-actions">
+      <span class="filter-label">Library cleanup</span>
+      <div class="trigger-row">
+        <button type="button" class="btn btn-danger" onclick="deleteBulk('uploaded')">
+          Delete uploaded videos
+        </button>
+        <button type="button" class="btn btn-danger" onclick="deleteBulk('all')">
+          Delete all videos
+        </button>
+      </div>
+      <p class="hint">Removes local files and dashboard rows. Does not delete videos from YouTube. Skips running/uploading jobs.</p>
+      <p id="bulk-status" class="hint"></p>
+    </div>
   </section>
 
   {% if next_runs %}
   <section class="panel schedule-panel">
-    <h2>Next scheduled (10:00 PM local)</h2>
+    <h2>Next scheduled</h2>
+    <p class="hint">10:00 AM &amp; 10:00 PM India time, shown in your system clock. One row per section.</p>
     <ul class="schedule-list">
       {% for item in next_runs %}
-      <li><strong>{{ item.section_code }}</strong> {{ item.period }} — {{ item.next_run }}</li>
+      <li>
+        <strong>{{ item.section_name }}</strong>
+        — {{ item.schedule }}
+        · next {{ item.next_run }}
+      </li>
       {% endfor %}
     </ul>
   </section>
@@ -165,7 +185,7 @@
     {% else %}
     <div class="empty-state panel">
       <h2>No Shorts yet</h2>
-      <p>Generate Technology, Entertainment, Global, or Business above. Files land under <code>output/YYYY-MM-DD/section/run_id/</code>.</p>
+      <p>Generate a section above. Files land under <code>output/YYYY-MM-DD/section/run_id/</code>.</p>
     </div>
     {% endfor %}
   </section>
@@ -222,6 +242,35 @@
         }
       } catch (e) {
         alert('Error: ' + e.message);
+      }
+    }
+
+    async function deleteBulk(scope) {
+      const status = document.getElementById('bulk-status');
+      const messages = {
+        all: 'Delete ALL local videos and dashboard rows? This cannot be undone. YouTube copies stay online.',
+        uploaded: 'Delete all locally stored videos that were already uploaded to YouTube? This cannot be undone. YouTube copies stay online.',
+      };
+      if (!confirm(messages[scope] || messages.all)) {
+        return;
+      }
+      status.textContent = 'Deleting…';
+      try {
+        const res = await fetch('/api/runs/delete-bulk?scope=' + encodeURIComponent(scope), {
+          method: 'POST',
+        });
+        const data = await res.json();
+        if (res.ok) {
+          const skipped = (data.skipped && data.skipped.length) || 0;
+          status.textContent = `Deleted ${data.deleted_count || 0}` +
+            (skipped ? ` (skipped ${skipped} busy)` : '') +
+            '. Refreshing…';
+          setTimeout(() => location.reload(), 800);
+        } else {
+          status.textContent = data.detail || 'Bulk delete failed';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
       }
     }
 

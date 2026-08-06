@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.parse
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -13,6 +14,27 @@ import feedparser
 from src.config import Section
 
 logger = logging.getLogger(__name__)
+
+# Prefer Latin-script English headlines (skip mostly non-English scripts).
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
+_NON_LATIN_LETTER_RE = re.compile(
+    r"[\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u0B80-\u0BFF"
+    r"\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0E00-\u0E7F"
+    r"\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]"
+)
+
+
+def _looks_english(text: str) -> bool:
+    """Keep titles that are primarily Latin/English letters."""
+    if not text or not text.strip():
+        return False
+    latin = len(_LATIN_LETTER_RE.findall(text))
+    non_latin = len(_NON_LATIN_LETTER_RE.findall(text))
+    if latin < 8:
+        return False
+    if non_latin and non_latin >= max(3, latin // 3):
+        return False
+    return True
 
 
 @dataclass
@@ -36,24 +58,27 @@ class GoogleNewsRssProvider(NewsProvider):
         seen: set[str] = set()
         for entry in feed.entries:
             title = (getattr(entry, "title", "") or "").strip()
-            if not title:
+            if not title or not _looks_english(title):
                 continue
             key = title.lower()
             if key in seen:
                 continue
             seen.add(key)
+            summary = (getattr(entry, "summary", "") or "").strip()
+            if summary and not _looks_english(summary):
+                summary = ""
             items.append(
                 NewsItem(
                     title=title,
                     link=getattr(entry, "link", "") or "",
-                    summary=(getattr(entry, "summary", "") or "")[:500],
+                    summary=summary[:800],
                     source="google_news_rss",
                 )
             )
             if len(items) >= max_items:
                 break
         logger.info(
-            "Fetched %s headlines for section %s from %s",
+            "Fetched %s English headlines for section %s from %s",
             len(items),
             section.code,
             url,
@@ -63,7 +88,8 @@ class GoogleNewsRssProvider(NewsProvider):
     def _build_url(self, section: Section) -> str:
         if section.rss_url:
             return section.rss_url
-        lang = section.language or "en"
+        # Always English Google News edition for narration + TTS.
+        lang = "en"
         region = (section.region or "US").upper()
         if section.search_query:
             query = urllib.parse.quote(section.search_query)

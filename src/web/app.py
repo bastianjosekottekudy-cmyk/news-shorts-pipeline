@@ -296,6 +296,50 @@ def _scheduled_run(section_code: str) -> None:
             _running_sections.discard(code)
 
 
+def _retry_failed_uploads() -> None:
+    """Hourly: re-attempt YouTube uploads that previously failed."""
+    if not _youtube_enabled():
+        return
+
+    failed = store.list_failed_uploads()
+    if not failed:
+        return
+
+    logger.info("Retrying %s failed YouTube upload(s)", len(failed))
+    for run in failed:
+        run_id = int(run["id"])
+        if run.get("status") == "running":
+            continue
+        if not _video_exists(run):
+            logger.warning(
+                "Skipping upload retry for run %s — video file missing",
+                run_id,
+            )
+            continue
+
+        with _upload_lock:
+            if run_id in _uploading_runs:
+                continue
+            _uploading_runs.add(run_id)
+
+        store.set_upload_status(run_id, "uploading", upload_error=None)
+        store.append_step_log(run_id, "upload", "Hourly retry of failed upload")
+        try:
+            _upload_run_video(run_id)
+        except Exception:
+            logger.exception("Hourly upload retry failed for run %s", run_id)
+            current = store.get_run(run_id)
+            if current and (current.get("upload_status") or "") == "uploading":
+                store.set_upload_status(
+                    run_id,
+                    "failed",
+                    upload_error="Hourly retry crashed unexpectedly",
+                )
+        finally:
+            with _upload_lock:
+                _uploading_runs.discard(run_id)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(
     request: Request,
@@ -377,21 +421,83 @@ async def video_download(run_id: int) -> FileResponse:
     )
 
 
+def _run_is_uploaded(run: dict[str, Any]) -> bool:
+    upload_status = _normalize_upload_status(run)
+    yt_id = (run.get("youtube_video_id") or "").strip()
+    return upload_status == "uploaded" and bool(yt_id) and yt_id != "skipped"
+
+
+def _delete_run_if_idle(run: dict[str, Any]) -> dict[str, Any]:
+    run_id = int(run["id"])
+    if run.get("status") == "running":
+        return {"run_id": run_id, "ok": False, "reason": "running"}
+    if (run.get("upload_status") or "") == "uploading" or run_id in _uploading_runs:
+        return {"run_id": run_id, "ok": False, "reason": "uploading"}
+
+    deleted_paths = _delete_run_artifacts(run)
+    store.delete_run(run_id)
+    logger.info("Deleted run %s and artifacts: %s", run_id, deleted_paths)
+    return {"run_id": run_id, "ok": True, "deleted_paths": deleted_paths}
+
+
 @app.delete("/api/runs/{run_id}")
 async def api_delete_run(run_id: int) -> JSONResponse:
     run = store.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    if run.get("status") == "running":
-        raise HTTPException(status_code=409, detail="Cannot delete a running job")
-    if (run.get("upload_status") or "") == "uploading":
+    result = _delete_run_if_idle(run)
+    if not result["ok"]:
+        reason = result.get("reason")
+        if reason == "running":
+            raise HTTPException(status_code=409, detail="Cannot delete a running job")
         raise HTTPException(status_code=409, detail="Cannot delete while uploading")
-
-    deleted_paths = _delete_run_artifacts(run)
-    store.delete_run(run_id)
-    logger.info("Deleted run %s and artifacts: %s", run_id, deleted_paths)
     return JSONResponse(
-        {"ok": True, "run_id": run_id, "deleted_paths": deleted_paths}
+        {
+            "ok": True,
+            "run_id": run_id,
+            "deleted_paths": result.get("deleted_paths", []),
+        }
+    )
+
+
+@app.post("/api/runs/delete-bulk")
+async def api_delete_runs_bulk(scope: str = "all") -> JSONResponse:
+    """Delete many local runs. scope: all | uploaded (local files + DB rows only)."""
+    scope_key = (scope or "all").strip().lower()
+    if scope_key not in ("all", "uploaded"):
+        raise HTTPException(
+            status_code=400, detail="scope must be 'all' or 'uploaded'"
+        )
+
+    runs = store.list_runs(limit=5000)
+    if scope_key == "uploaded":
+        runs = [r for r in runs if _run_is_uploaded(r)]
+
+    deleted: list[int] = []
+    skipped: list[dict[str, Any]] = []
+    for run in runs:
+        result = _delete_run_if_idle(run)
+        if result["ok"]:
+            deleted.append(int(result["run_id"]))
+        else:
+            skipped.append(
+                {"run_id": result["run_id"], "reason": result.get("reason")}
+            )
+
+    logger.info(
+        "Bulk delete scope=%s deleted=%s skipped=%s",
+        scope_key,
+        len(deleted),
+        len(skipped),
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "scope": scope_key,
+            "deleted_count": len(deleted),
+            "deleted_ids": deleted,
+            "skipped": skipped,
+        }
     )
 
 
