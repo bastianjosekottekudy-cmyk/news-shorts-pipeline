@@ -17,10 +17,11 @@ def format_display_date(run_date: str) -> str:
 
 
 def sanitize_news_title(title: str, max_len: int = 100) -> str:
-    """Clean a headline (for overlays / descriptions)."""
+    """Clean a headline (for overlays / descriptions). Strip publisher tails only."""
     cleaned = re.sub(r"\s+", " ", (title or "").strip())
+    # Require whitespace around the delimiter so "anti-government" is kept intact.
     cleaned = re.sub(
-        r"\s*[\|\-–—]\s*[A-Za-z0-9][A-Za-z0-9 .,&/'!]{0,40}$",
+        r"\s+[\|\-–—]\s+[A-Za-z0-9][A-Za-z0-9 .,&/'!]{0,40}$",
         "",
         cleaned,
     ).strip()

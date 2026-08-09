@@ -62,12 +62,14 @@ def _load_segments(script_path: Path, output_dir: Path) -> list[dict[str, Any]]:
 def _prepare_tts_text(text: str) -> str:
     """
     Normalize text for edge-tts.
-    Hyphenated compounds are spoken more reliably with a space
-    (anti-government → anti government) so synthesis doesn't stall/cut off.
+    Strip leftover source tails, then expand hyphenated compounds so synthesis
+    doesn't stall (anti-government → anti government).
     """
     import re
 
-    cleaned = (text or "").strip()
+    from src.script.generator import _clean_for_speech
+
+    cleaned = _clean_for_speech(text or "")
     # Keep spaced dashes as pauses; expand in-word hyphens for speech
     cleaned = re.sub(r"(?<=\w)[-–—](?=\w)", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()

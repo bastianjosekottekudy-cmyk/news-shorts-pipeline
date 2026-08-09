@@ -32,7 +32,10 @@ def generate_display_title(
 
 
 def story_card(news_title: str, section_name: str, rank: int) -> dict[str, str]:
+    from src.script.generator import _clean_for_speech
+
+    cleaned = sanitize_news_title(_clean_for_speech(news_title), max_len=90)
     return {
-        "title": sanitize_news_title(news_title, max_len=90),
+        "title": cleaned,
         "subtitle": f"{section_name} · #{rank}",
     }

@@ -1,6 +1,6 @@
 max_images_per_short: 4
-max_video_duration_sec: 58   # under YouTube Shorts limit
-target_duration_sec: 55
+max_video_duration_sec: 90   # allow clearer multi-story narration
+target_duration_sec: 70
 
 web:
   host: 127.0.0.1
@@ -9,7 +9,7 @@ web:
 video:
   width: 1080
   height: 1920
-  target_duration_sec: 55
+  target_duration_sec: 70
   fps: 24
   format: mp4
   # auto = use NVIDIA NVENC when available, else libx264
@@ -18,14 +18,14 @@ video:
 tts:
   provider: edge-tts
   rate: "-8%"
-  segment_pause_sec: 0.35
+  segment_pause_sec: 0.4
   voice_map:
     en: en-US-JennyNeural
 
 script:
   provider: groq   # groq | template
   model: llama-3.1-8b-instant
-  style: clear English YouTube Shorts news roundup host; slightly descriptive 1-2 sentence beats; natural spoken pacing; no invented facts
+  style: natural English news Shorts host; explain each story in 1-2 clear sentences; do not re-read on-screen headlines; never name outlets
   intro_template: "Here are today's top {n} {section} stories."
   outro_template: "Thanks for watching. Follow for more English news Shorts."
 
