@@ -10,7 +10,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -246,6 +246,54 @@ class LLMChain:
             text = "\n".join(parts)
         return str(text or "").strip()
 
+    def cloud_endpoints(self) -> list[LLMEndpoint]:
+        return [e for e in self.chain if e.provider != "template"]
+
+    def try_complete(
+        self,
+        endpoint: LLMEndpoint,
+        system: str,
+        user: str,
+        *,
+        temperature: float = 0.55,
+        max_tokens: int = 1800,
+    ) -> str | None:
+        """Invoke one endpoint with a single 429 retry. Returns None on failure."""
+        for attempt in range(2):
+            try:
+                text = self._invoke_endpoint(
+                    endpoint,
+                    system,
+                    user,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                if not text.strip():
+                    raise RuntimeError("empty model response")
+                self.last_endpoint = endpoint.label
+                return text
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)
+                self.last_error = f"{endpoint.label}: {err[:300]}"
+                if ("429" in err or "RESOURCE_EXHAUSTED" in err) and attempt == 0:
+                    m = re.search(r"[Rr]etry in ([\d.]+)", err)
+                    wait = float(m.group(1)) if m else 2.0
+                    wait = min(max(wait, 0.5), 8.0)
+                    logger.warning(
+                        "LLM rate-limited on %s — retry in %.1fs",
+                        endpoint.label,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                logger.warning(
+                    "LLM failed on %s (%s)",
+                    endpoint.label,
+                    err[:160],
+                )
+                return None
+        return None
+
     def complete(
         self,
         system: str,
@@ -257,6 +305,28 @@ class LLMChain:
         """
         Return model text, or ``TEMPLATE_SENTINEL`` when all cloud endpoints fail /
         the chain reaches the template step.
+        """
+        return self.complete_until(
+            system,
+            user,
+            accept=lambda _text: True,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def complete_until(
+        self,
+        system: str,
+        user: str,
+        *,
+        accept: Callable[[str], bool],
+        temperature: float = 0.55,
+        max_tokens: int = 1800,
+    ) -> str:
+        """
+        Try each cloud endpoint until ``accept(text)`` is true.
+        HTTP failures / 429 / rejected payloads advance to the next endpoint.
+        Returns ``TEMPLATE_SENTINEL`` when exhausted.
         """
         self.last_endpoint = None
         self.last_error = None
@@ -270,7 +340,7 @@ class LLMChain:
                 if errors:
                     self.last_error = " | ".join(errors)[:500]
                     logger.warning(
-                        "All LLM endpoints failed — using template. Last: %s",
+                        "All LLM endpoints failed validation — using template. Last: %s",
                         errors[-1][:200],
                     )
                 return TEMPLATE_SENTINEL
@@ -286,9 +356,19 @@ class LLMChain:
                     )
                     if not text.strip():
                         raise RuntimeError("empty model response")
+                    if not accept(text):
+                        errors.append(f"{endpoint.label}: response rejected by validator")
+                        self.last_error = errors[-1][:300]
+                        logger.warning(
+                            "LLM response rejected on %s — next fallback",
+                            endpoint.label,
+                        )
+                        break
                     self.last_endpoint = endpoint.label
                     if attempt or errors:
                         logger.info("LLM ok via %s", endpoint.label)
+                    else:
+                        logger.info("LLM accepted via %s", endpoint.label)
                     return text
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)

@@ -297,12 +297,18 @@ def _scheduled_run(section_code: str) -> None:
 
 
 def _retry_failed_uploads() -> None:
-    """Hourly: re-attempt YouTube uploads that previously failed."""
+    """Re-attempt YouTube uploads that previously failed (only when any exist)."""
     if not _youtube_enabled():
+        from src.scheduler import sync_failed_upload_retry_job
+
+        sync_failed_upload_retry_job()
         return
 
     failed = store.list_failed_uploads()
     if not failed:
+        from src.scheduler import sync_failed_upload_retry_job
+
+        sync_failed_upload_retry_job()
         return
 
     logger.info("Retrying %s failed YouTube upload(s)", len(failed))
@@ -338,6 +344,11 @@ def _retry_failed_uploads() -> None:
         finally:
             with _upload_lock:
                 _uploading_runs.discard(run_id)
+
+    from src.scheduler import sync_failed_upload_retry_job
+
+    # Keep or clear the job based on whether failures remain.
+    sync_failed_upload_retry_job()
 
 
 @app.get("/", response_class=HTMLResponse)

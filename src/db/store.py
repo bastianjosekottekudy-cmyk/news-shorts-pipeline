@@ -288,6 +288,20 @@ def list_failed_uploads(limit: int = 100) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+def count_failed_uploads() -> int:
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM runs
+            WHERE upload_status = 'failed'
+              AND status = 'success'
+              AND video_path IS NOT NULL
+              AND video_path != ''
+            """
+        ).fetchone()
+        return int(row[0])
+
+
 def list_run_dates() -> list[str]:
     with db() as conn:
         rows = conn.execute(

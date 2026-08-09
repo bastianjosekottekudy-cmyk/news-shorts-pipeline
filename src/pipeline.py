@@ -76,11 +76,17 @@ def _attempt_youtube_upload(
         logger.warning("YouTube upload failed for run %s: %s", run_id, exc)
         store.set_upload_status(run_id, "failed", upload_error=msg)
         store.append_step_log(run_id, "upload", f"Upload failed: {exc}")
+        from src.scheduler import sync_failed_upload_retry_job
+
+        sync_failed_upload_retry_job()
         return None
     except Exception as exc:
         logger.exception("Unexpected YouTube upload error for run %s", run_id)
         store.set_upload_status(run_id, "failed", upload_error=str(exc))
         store.append_step_log(run_id, "upload", f"Upload failed: {exc}")
+        from src.scheduler import sync_failed_upload_retry_job
+
+        sync_failed_upload_retry_job()
         return None
 
 

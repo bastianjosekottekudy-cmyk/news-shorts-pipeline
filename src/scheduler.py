@@ -1,9 +1,9 @@
-"""APScheduler: section batches (IST) + hourly failed-upload retries."""
+"""APScheduler: section batches (IST) + conditional failed-upload retries."""
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -19,8 +19,10 @@ logger = logging.getLogger(__name__)
 SCHEDULE_TIMEZONE = "Asia/Kolkata"
 SCHEDULE_HOURS = (10, 22)  # 10:00 AM and 10:00 PM IST
 UPLOAD_RETRY_JOB_ID = "retry-failed-uploads"
+UPLOAD_RETRY_INTERVAL_HOURS = 1
 
 _scheduler: BackgroundScheduler | None = None
+_retry_uploads_callback: Callable[[], None] | None = None
 
 
 def _format_local(dt: datetime) -> str:
@@ -38,13 +40,53 @@ def _format_local_clock(hour: int, minute: int = 0) -> str:
     return local.strftime("%I:%M %p").lstrip("0")
 
 
+def sync_failed_upload_retry_job(*, run_in_hours: float | None = None) -> None:
+    """
+    Keep the hourly retry job only while failed uploads exist.
+    Does nothing if the scheduler or retry callback is not ready.
+    """
+    if not _scheduler or not _scheduler.running or _retry_uploads_callback is None:
+        return
+
+    from src.db import store
+
+    has_failed = store.count_failed_uploads() > 0
+    existing = _scheduler.get_job(UPLOAD_RETRY_JOB_ID)
+
+    if not has_failed:
+        if existing is not None:
+            _scheduler.remove_job(UPLOAD_RETRY_JOB_ID)
+            logger.info("Cleared upload-retry job — no failed uploads")
+        return
+
+    delay_h = (
+        UPLOAD_RETRY_INTERVAL_HOURS if run_in_hours is None else max(0.0, float(run_in_hours))
+    )
+    next_run = datetime.now().astimezone() + timedelta(hours=delay_h)
+
+    if existing is None:
+        _scheduler.add_job(
+            _retry_uploads_callback,
+            trigger=IntervalTrigger(hours=UPLOAD_RETRY_INTERVAL_HOURS),
+            id=UPLOAD_RETRY_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=1800,
+            next_run_time=next_run,
+        )
+        logger.info(
+            "Scheduled upload retry every %sh (next %s) — failed uploads pending",
+            UPLOAD_RETRY_INTERVAL_HOURS,
+            _format_local(next_run),
+        )
+
+
 def start_scheduler(
     run_callback: Callable[[str], None],
     *,
     retry_uploads_callback: Callable[[], None] | None = None,
 ) -> BackgroundScheduler:
-    """Section jobs at 10 AM/PM IST; optional hourly failed-upload retries."""
-    global _scheduler
+    """Section jobs at 10 AM/PM IST; upload retries only while failures exist."""
+    global _scheduler, _retry_uploads_callback
     if _scheduler and _scheduler.running:
         return _scheduler
 
@@ -71,20 +113,14 @@ def start_scheduler(
                 section.name,
             )
 
-    if retry_uploads_callback is not None:
-        scheduler.add_job(
-            retry_uploads_callback,
-            trigger=IntervalTrigger(hours=1),
-            id=UPLOAD_RETRY_JOB_ID,
-            replace_existing=True,
-            misfire_grace_time=1800,
-            # First retry soon after start so overnight failures aren't waited out.
-            next_run_time=datetime.now().astimezone(),
-        )
-        logger.info("Scheduled hourly retry for failed YouTube uploads")
-
+    _retry_uploads_callback = retry_uploads_callback
     scheduler.start()
     _scheduler = scheduler
+
+    # Only arm retry if there are already failed uploads (e.g. after restart).
+    if retry_uploads_callback is not None:
+        sync_failed_upload_retry_job()
+
     return scheduler
 
 
@@ -134,7 +170,8 @@ def get_next_run_times() -> list[dict[str, str]]:
 
 
 def shutdown_scheduler() -> None:
-    global _scheduler
+    global _scheduler, _retry_uploads_callback
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
-        _scheduler = None
+    _scheduler = None
+    _retry_uploads_callback = None

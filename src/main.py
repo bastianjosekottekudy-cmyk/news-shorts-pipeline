@@ -36,7 +36,14 @@ def main() -> None:
 
     start_scheduler(_scheduled_run, retry_uploads_callback=_retry_failed_uploads)
     logger.info("Scheduler started — daily 10:00 AM and 10:00 PM IST for every section")
-    logger.info("Failed YouTube uploads will retry every 1 hour")
+    failed_uploads = store.count_failed_uploads()
+    if failed_uploads:
+        logger.info(
+            "%s failed YouTube upload(s) pending — retry job armed (hourly while failures remain)",
+            failed_uploads,
+        )
+    else:
+        logger.info("No failed YouTube uploads — retry job not scheduled")
     logger.info("Dashboard: http://%s:%s", host, port)
 
     try:

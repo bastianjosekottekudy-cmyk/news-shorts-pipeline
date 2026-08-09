@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from src.config import Section, load_pipeline_config
-from src.llm.chain import TEMPLATE_SENTINEL, get_llm_chain
+from src.llm.chain import get_llm_chain
 from src.naming import sanitize_news_title
 
 logger = logging.getLogger(__name__)
@@ -422,49 +422,271 @@ def _strip_fences(text: str) -> str:
     return cleaned.strip()
 
 
-def _parse_narration_segments(
-    raw: str,
-    section: Section,
-    news_items: list[dict[str, Any]],
-) -> dict[str, Any] | None:
+def _extract_trends_list(payload: dict[str, Any]) -> list[Any] | None:
+    for key in ("trends", "beats", "stories"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
+def _loads_json_object(raw: str) -> dict[str, Any] | None:
     try:
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         payload = json.loads(match.group(0) if match else raw)
     except (json.JSONDecodeError, AttributeError, TypeError):
         return None
+    return payload if isinstance(payload, dict) else None
 
-    intro = _ensure_sentence(_clean_for_speech(str(payload.get("intro") or "")))
-    outro = _ensure_sentence(_clean_for_speech(str(payload.get("outro") or "")))
-    raw_trends = payload.get("trends")
-    if not isinstance(raw_trends, list):
-        return None
-    raw_beats = [str(b) for b in raw_trends if str(b).strip()]
-    if not raw_beats:
-        return None
 
-    # Always exactly one beat per on-screen story (keeps slides + audio in sync).
+def _extract_beat_strings(raw: str) -> tuple[str, list[str], str] | None:
+    """Parse intro / beat list / outro from model JSON (beats may be partial)."""
+    payload = _loads_json_object(_strip_fences(raw))
+    if not payload:
+        return None
+    raw_trends = _extract_trends_list(payload)
+    if raw_trends is None:
+        return None
+    beats = [str(b).strip() for b in raw_trends if str(b).strip()]
+    if not beats:
+        return None
+    intro = _clean_for_speech(str(payload.get("intro") or ""))
+    outro = _clean_for_speech(str(payload.get("outro") or ""))
+    return intro, beats, outro
+
+
+def _build_gap_fill_prompt(
+    section: Section,
+    news_items: list[dict[str, Any]],
+    missing_indices: list[int],
+    existing_beats: list[str | None],
+) -> str:
+    """Ask a model to write ONLY the missing story beats, in order."""
+    lines = [
+        f"Fill missing spoken narration beats for a {section.name} YouTube Short.",
+        f"Return ONLY JSON: {{ \"trends\": [\"beat1\", ...] }} with exactly {len(missing_indices)} strings.",
+        "Each beat is 1–2 natural spoken sentences. English only.",
+        "Do not re-read on-screen captions word-for-word. No outlets, URLs, or .com domains.",
+        "Do not rewrite beats that already exist — only write the missing ones listed below.",
+        "",
+        "Already written beats (for context, do not repeat):",
+    ]
+    for idx, item in enumerate(news_items):
+        caption = _headline(item)
+        if existing_beats[idx]:
+            lines.append(f"{idx + 1}. DONE caption={caption!r} beat={existing_beats[idx]!r}")
+        else:
+            lines.append(f"{idx + 1}. MISSING caption={caption!r}")
+    lines.append("")
+    lines.append("Write beats ONLY for these missing story numbers, in this order:")
+    for idx in missing_indices:
+        item = news_items[idx]
+        lines.append(
+            f"- story {idx + 1}: on_screen_caption={_headline(item)!r} "
+            f"extra_fact={_fact(item) or '(none)'!r}"
+        )
+    return "\n".join(lines)
+
+
+_GAP_FILL_SYSTEM = (
+    "You write missing YouTube Shorts news narration beats in English. "
+    "Return JSON only with a trends array. Never invent events. "
+    "No outlets or website domains."
+)
+
+
+def _assemble_segments(
+    section: Section,
+    news_items: list[dict[str, Any]],
+    beat_slots: list[str | None],
+    *,
+    intro: str = "",
+    outro: str = "",
+    pad_missing: bool = True,
+) -> dict[str, Any]:
+    """Finalize beat slots into speech segments; optionally headline-pad gaps."""
+    n = len(news_items)
     beats: list[str] = []
     keywords: list[str] = []
     for idx, item in enumerate(news_items):
         opener = _OPENERS[min(idx, len(_OPENERS) - 1)]
         headline = _headline(item)
         keywords.append(headline)
-        if idx < len(raw_beats):
-            beats.append(_finalize_beat(raw_beats[idx], headline, opener))
-        else:
+        raw_beat = beat_slots[idx] if idx < len(beat_slots) else None
+        if raw_beat and str(raw_beat).strip():
+            beats.append(_finalize_beat(str(raw_beat), headline, opener))
+        elif pad_missing:
             fallback = _fact(item) or headline
             beats.append(_finalize_beat(fallback, headline, opener))
+        else:
+            beats.append("")
 
-    if not intro:
-        intro = f"Here are today's top {len(news_items)} {section.name} stories."
-    if not outro:
-        outro = "Thanks for watching. Follow for more news Shorts."
+    intro_out = _ensure_sentence(_clean_for_speech(intro)) if intro else ""
+    outro_out = _ensure_sentence(_clean_for_speech(outro)) if outro else ""
+    if not intro_out:
+        intro_out = f"Here are today's top {n} {section.name} stories."
+    if not outro_out:
+        outro_out = "Thanks for watching. Follow for more news Shorts."
     return {
-        "intro": intro,
+        "intro": intro_out,
         "trends": beats,
-        "outro": outro,
+        "outro": outro_out,
         "trend_keywords": keywords,
     }
+
+
+def _parse_narration_segments(
+    raw: str,
+    section: Section,
+    news_items: list[dict[str, Any]],
+    *,
+    allow_pad: bool = False,
+) -> dict[str, Any] | None:
+    """Parse a full narration JSON blob into segments (legacy helper / tests)."""
+    extracted = _extract_beat_strings(raw)
+    if not extracted:
+        return None
+    intro, raw_beats, outro = extracted
+    want = len(news_items)
+    if not allow_pad and len(raw_beats) != want:
+        logger.info(
+            "Incomplete trends: got %s want %s",
+            len(raw_beats),
+            want,
+        )
+        return None
+
+    slots: list[str | None] = [None] * want
+    for i, beat in enumerate(raw_beats[:want]):
+        slots[i] = beat
+    if not allow_pad and any(s is None for s in slots):
+        return None
+    return _assemble_segments(
+        section,
+        news_items,
+        slots,
+        intro=intro,
+        outro=outro,
+        pad_missing=allow_pad,
+    )
+
+
+def _fill_narration_with_chain(
+    chain: Any,
+    section: Section,
+    news_items: list[dict[str, Any]],
+    max_words: int,
+) -> tuple[dict[str, Any], str, str | None]:
+    """
+    Build narration by keeping partial LLM beats and gap-filling with later models.
+
+    Returns (segments, endpoint_label, last_error).
+    """
+    n = len(news_items)
+    slots: list[str | None] = [None] * n
+    intro = ""
+    outro = ""
+    used_labels: list[str] = []
+    last_error: str | None = None
+    full_prompt = _build_prompt(section, news_items, max_words)
+
+    for endpoint in chain.cloud_endpoints():
+        missing = [i for i, b in enumerate(slots) if not b]
+        if not missing:
+            break
+
+        if len(missing) == n:
+            system, user = _NARRATION_SYSTEM, full_prompt
+            mode = "full"
+        else:
+            system, user = _GAP_FILL_SYSTEM, _build_gap_fill_prompt(
+                section, news_items, missing, slots
+            )
+            mode = "gap-fill"
+
+        logger.info(
+            "Narration %s via %s (missing %s/%s)",
+            mode,
+            endpoint.label,
+            len(missing),
+            n,
+        )
+        text = chain.try_complete(endpoint, system, user)
+        if text is None:
+            last_error = chain.last_error
+            continue
+
+        extracted = _extract_beat_strings(text)
+        if not extracted:
+            last_error = f"{endpoint.label}: unusable JSON"
+            logger.warning("Unusable narration JSON from %s — keep going", endpoint.label)
+            continue
+
+        new_intro, new_beats, new_outro = extracted
+        if mode == "full":
+            if new_intro:
+                intro = new_intro
+            if new_outro:
+                outro = new_outro
+            filled = 0
+            for i, beat in enumerate(new_beats[:n]):
+                if not slots[i]:
+                    slots[i] = beat
+                    filled += 1
+            used_labels.append(endpoint.label)
+            logger.info(
+                "Kept %s beat(s) from %s (%s/%s filled)",
+                filled,
+                endpoint.label,
+                sum(1 for b in slots if b),
+                n,
+            )
+        else:
+            # Map returned beats onto missing indices in order.
+            filled = 0
+            for offset, beat in enumerate(new_beats):
+                if offset >= len(missing):
+                    break
+                idx = missing[offset]
+                if not slots[idx]:
+                    slots[idx] = beat
+                    filled += 1
+            if filled:
+                used_labels.append(f"{endpoint.label}+gap")
+            logger.info(
+                "Gap-filled %s beat(s) from %s (%s/%s filled)",
+                filled,
+                endpoint.label,
+                sum(1 for b in slots if b),
+                n,
+            )
+
+    still_missing = sum(1 for b in slots if not b)
+    if still_missing:
+        logger.info(
+            "Headline-padding %s remaining beat(s) after LLM chain",
+            still_missing,
+        )
+
+    segments = _assemble_segments(
+        section,
+        news_items,
+        slots,
+        intro=intro,
+        outro=outro,
+        pad_missing=True,
+    )
+    if used_labels:
+        label = "+".join(used_labels[:4])
+        if len(used_labels) > 4:
+            label += f"+{len(used_labels) - 4}more"
+        if still_missing:
+            label += "+headline-pad"
+    else:
+        label = "template"
+        segments = _template_segments(section, news_items)
+
+    return segments, label, last_error
 
 
 def generate_script(
@@ -491,18 +713,15 @@ def generate_script(
     if provider != "template":
         try:
             chain = get_llm_chain(yaml_model=yaml_model)
-            prompt = _build_prompt(section, news_items, max_words)
-            raw = chain.complete(_NARRATION_SYSTEM, prompt)
-            used_endpoint = chain.last_endpoint
-            last_error = chain.last_error
-            if raw != TEMPLATE_SENTINEL:
-                raw = _strip_fences(raw)
-                segments = _parse_narration_segments(raw, section, news_items)
-                if segments is None:
-                    raise ValueError("Could not parse narration JSON segments")
-                used_provider = used_endpoint or "chain"
-            else:
-                segments = None
+            segments, used_endpoint, last_error = _fill_narration_with_chain(
+                chain, section, news_items, max_words
+            )
+            used_provider = used_endpoint or "chain"
+            logger.info(
+                "Narration assembled via %s (%s beats)",
+                used_endpoint,
+                len(segments["trends"]),
+            )
         except Exception as exc:
             logger.warning("LLM narration chain failed, using template: %s", exc)
             last_error = str(exc)[:300]
