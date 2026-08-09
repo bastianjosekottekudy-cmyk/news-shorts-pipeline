@@ -1,4 +1,4 @@
-"""Shorts narration — roundup of N news stories → Groq / template segments."""
+"""Shorts narration — roundup of N news stories → LLM chain / template segments."""
 
 from __future__ import annotations
 
@@ -9,17 +9,35 @@ import re
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from src.config import Section, get_env, load_pipeline_config
+from src.config import Section, load_pipeline_config
+from src.llm.chain import TEMPLATE_SENTINEL, get_llm_chain
 from src.naming import sanitize_news_title
 
 logger = logging.getLogger(__name__)
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 WORDS_PER_SEC = 2.3
+_NARRATION_SYSTEM = (
+    "You write natural spoken English for YouTube Shorts news narration. "
+    "Write like a human host talking to camera — complete sentences, natural pacing. "
+    "Viewers already see each headline on screen — explain the story; "
+    "do not re-read captions. Never invent events. Never name news outlets. "
+    "Never include URLs, website names, or domains (nothing with .com, .net, .org, etc.). "
+    "Keep one spoken beat per story, in order. "
+    "Reply with JSON only — no markdown fences."
+)
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+# Bare domains TTS would read as "dot com" (CNBC.com, example.co.uk, …).
+_DOMAIN_RE = re.compile(
+    r"\b(?:[\w-]+\.)+(?:com|net|org|io|co|info|tv|news|ai|app|dev|me|uk|us|in|cy)"
+    r"(?:\.[a-z]{2,3})?\b",
+    re.IGNORECASE,
+)
+_DOMAIN_TAIL_RE = re.compile(
+    r"(?:\s+[\|\-–—]\s+|\s{2,})"
+    r"[A-Za-z0-9][A-Za-z0-9 .,&/'!]{0,40}\.(?:com|net|org|io)\b\.?$",
+    re.IGNORECASE,
+)
 # Publisher tails like " - BBC" / " | Reuters" — MUST have whitespace around
 # the delimiter so we never chop hyphenated words (anti-government → anti).
 _SOURCE_TAIL_RE = re.compile(
@@ -133,9 +151,42 @@ def _strip_sources(text: str) -> str:
     return cleaned.strip()
 
 
+def _domain_to_speech(match: re.Match[str]) -> str:
+    """Turn Apple.com → Apple; drop longer hostnames so TTS never says 'dot com'."""
+    labels = match.group(0).split(".")
+    if len(labels) == 2:
+        return labels[0]
+    if len(labels) == 3 and labels[0].lower() == "www":
+        return labels[1]
+    return " "
+
+
+def _strip_domains(text: str) -> str:
+    cleaned = text or ""
+    for _ in range(2):
+        cleaned = _DOMAIN_TAIL_RE.sub("", cleaned).strip()
+    cleaned = _DOMAIN_RE.sub(_domain_to_speech, cleaned)
+    # Leftover "dot com" / ". com" spoken artifacts
+    cleaned = re.sub(r"\bdot\s+com\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\.\s*com\b", " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def _ensure_sentence(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return cleaned
+    # Prefer a normal spoken sentence ending.
+    cleaned = cleaned.rstrip(" ,;:")
+    if cleaned[-1] not in ".!?":
+        cleaned += "."
+    return cleaned
+
+
 def _clean_for_speech(text: str) -> str:
     cleaned = _strip_html(text)
     cleaned = _URL_RE.sub(" ", cleaned)
+    cleaned = _strip_domains(cleaned)
     cleaned = re.sub(r"\bnbsp\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"&[#a-zA-Z0-9]+;", " ", cleaned)
     cleaned = re.sub(r"[^\S\r\n]+", " ", cleaned)
@@ -151,9 +202,11 @@ def _clean_for_speech(text: str) -> str:
     ).strip()
     for _ in range(2):
         cleaned = _SOURCE_TAIL_RE.sub("", cleaned).strip()
+        cleaned = _DOMAIN_TAIL_RE.sub("", cleaned).strip()
     cleaned = _strip_sources(cleaned)
+    cleaned = _strip_domains(cleaned)
     cleaned = cleaned.replace("\u2011", "-").replace("\u2013", "-").replace("\u2014", "-")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,;:\"'")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;:\"'")
     return cleaned.strip()
 
 
@@ -269,7 +322,7 @@ def _finalize_beat(raw_beat: str, headline: str, opener: str) -> str:
     beat = _remove_headline_echo(beat, headline)
     if not beat or len(beat) < 18:
         # Meaningful fallback without outlet noise: speak a clean one-liner once.
-        beat = f"{headline}."
+        beat = _clean_for_speech(headline)
     # Ensure a single natural opener (don't double "Next, Next,")
     low = beat.lower()
     if not any(
@@ -280,9 +333,7 @@ def _finalize_beat(raw_beat: str, headline: str, opener: str) -> str:
             beat = beat[0].lower() + beat[1:]
         beat = f"{opener} {beat}"
     beat = _clean_for_speech(beat)
-    if beat and beat[-1] not in ".!?":
-        beat += "."
-    return beat
+    return _ensure_sentence(beat)
 
 
 def _template_segments(
@@ -342,10 +393,12 @@ def _build_prompt(
         "CRITICAL sync rules:",
         f"- Return exactly {len(news_items)} body beats, one per story, in the same order as listed.",
         "- Each on-screen caption already shows that story's headline. Do NOT read the headline word-for-word.",
-        "- Each beat must be 1–2 spoken sentences that explain what happened and why it matters, using the extra fact when available.",
+        "- Each beat must be 1–2 natural spoken sentences (subject + verb), explaining what happened and why it matters.",
+        "- Sound like a person talking, not a headline paste or RSS blurb.",
         "- If the fact is empty, lightly rephrase the headline into natural speech — still do not paste it verbatim if you can avoid it.",
         "- Never mention publishers, outlets, or sources (no BBC, Reuters, CNN, 'according to…', etc.).",
-        "- No URLs, hashtags, or markdown.",
+        "- Never include URLs, domains, or site names (no .com / .net / www).",
+        "- No hashtags or markdown.",
         "- Short intro naming the section and story count; short CTA outro.",
         "",
         "Return ONLY valid JSON:",
@@ -362,40 +415,14 @@ def _build_prompt(
     return "\n".join(lines)
 
 
-def _call_groq(prompt: str, model: str, api_key: str) -> str:
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "temperature": 0.55,
-        "max_tokens": 1800,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You write natural English YouTube Shorts news narration. "
-                    "Viewers already see each headline on screen — explain the story; "
-                    "do not re-read captions. Never invent events. Never name news outlets. "
-                    "Keep one spoken beat per story, in order. "
-                    "Reply with JSON only — no markdown fences."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-    }
-    with httpx.Client(timeout=60.0) as client:
-        resp = client.post(GROQ_URL, headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-    text = data["choices"][0]["message"]["content"].strip()
-    text = re.sub(r"^```(?:\w+)?\n?", "", text)
-    text = re.sub(r"\n?```$", "", text)
-    return text.strip()
+def _strip_fences(text: str) -> str:
+    cleaned = (text or "").strip()
+    cleaned = re.sub(r"^```(?:\w+)?\n?", "", cleaned)
+    cleaned = re.sub(r"\n?```$", "", cleaned)
+    return cleaned.strip()
 
 
-def _parse_groq_segments(
+def _parse_narration_segments(
     raw: str,
     section: Section,
     news_items: list[dict[str, Any]],
@@ -406,8 +433,8 @@ def _parse_groq_segments(
     except (json.JSONDecodeError, AttributeError, TypeError):
         return None
 
-    intro = _clean_for_speech(str(payload.get("intro") or ""))
-    outro = _clean_for_speech(str(payload.get("outro") or ""))
+    intro = _ensure_sentence(_clean_for_speech(str(payload.get("intro") or "")))
+    outro = _ensure_sentence(_clean_for_speech(str(payload.get("outro") or "")))
     raw_trends = payload.get("trends")
     if not isinstance(raw_trends, list):
         return None
@@ -452,28 +479,38 @@ def generate_script(
 
     config = load_pipeline_config()
     script_cfg = config.get("script", {})
-    provider = str(script_cfg.get("provider", "groq")).lower()
-    model = str(script_cfg.get("model", "llama-3.1-8b-instant"))
-    api_key = get_env("GROQ_API_KEY")
+    provider = str(script_cfg.get("provider", "chain")).lower()
+    yaml_model = str(script_cfg.get("model", "llama-3.1-8b-instant"))
     max_words = _max_words()
 
     used_provider = "template"
+    used_endpoint: str | None = None
+    last_error: str | None = None
     segments: dict[str, Any] | None = None
 
-    if provider == "groq" and api_key:
+    if provider != "template":
         try:
+            chain = get_llm_chain(yaml_model=yaml_model)
             prompt = _build_prompt(section, news_items, max_words)
-            raw = _call_groq(prompt, model, api_key)
-            segments = _parse_groq_segments(raw, section, news_items)
-            if segments is None:
-                raise ValueError("Could not parse Groq JSON segments")
-            used_provider = "groq"
+            raw = chain.complete(_NARRATION_SYSTEM, prompt)
+            used_endpoint = chain.last_endpoint
+            last_error = chain.last_error
+            if raw != TEMPLATE_SENTINEL:
+                raw = _strip_fences(raw)
+                segments = _parse_narration_segments(raw, section, news_items)
+                if segments is None:
+                    raise ValueError("Could not parse narration JSON segments")
+                used_provider = used_endpoint or "chain"
+            else:
+                segments = None
         except Exception as exc:
-            logger.warning("Groq narration failed, using template: %s", exc)
+            logger.warning("LLM narration chain failed, using template: %s", exc)
+            last_error = str(exc)[:300]
             segments = None
 
     if segments is None:
         used_provider = "template"
+        used_endpoint = "template"
         segments = _template_segments(section, news_items)
 
     # Never drop story beats — that desyncs narration from on-screen news.
@@ -502,7 +539,9 @@ def generate_script(
         json.dumps(
             {
                 "provider": used_provider,
-                "model": model if used_provider == "groq" else None,
+                "endpoint": used_endpoint,
+                "model": yaml_model if used_provider != "template" else None,
+                "last_error": last_error,
                 "word_count": _word_count(script),
                 "max_words": max_words,
                 "stories": len(segments["trends"]),
@@ -513,7 +552,7 @@ def generate_script(
     )
     logger.info(
         "Short script via %s (%s words, %s stories)",
-        used_provider,
+        used_endpoint or used_provider,
         _word_count(script),
         len(segments["trends"]),
     )

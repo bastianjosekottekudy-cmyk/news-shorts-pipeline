@@ -23,9 +23,9 @@ tts:
     en: en-US-JennyNeural
 
 script:
-  provider: groq   # groq | template
-  model: llama-3.1-8b-instant
-  style: natural English news Shorts host; explain each story in 1-2 clear sentences; do not re-read on-screen headlines; never name outlets
+  provider: chain   # chain | groq (alias) | template
+  model: llama-3.1-8b-instant   # used only when LLM_PROVIDER/LLM_CHAIN unset
+  style: natural human news Shorts host speaking in complete sentences; explain each story clearly; do not re-read on-screen headlines; never name outlets or say website domains/.com
   intro_template: "Here are today's top {n} {section} stories."
   outro_template: "Thanks for watching. Follow for more English news Shorts."
 

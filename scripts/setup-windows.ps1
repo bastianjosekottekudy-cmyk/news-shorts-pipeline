@@ -48,7 +48,15 @@ Write-Host "Installing dependencies..."
 
 if (-not (Test-Path ".env")) {
     Copy-Item .env.example .env
-    Write-Host "Created .env from .env.example - fill in Groq / YouTube credentials." -ForegroundColor Yellow
+    Write-Host "Created .env from .env.example - fill in YouTube credentials if needed." -ForegroundColor Yellow
+}
+
+$commEnv = Join-Path (Resolve-Path ..).Path "comm-assistant\.env"
+if (Test-Path $commEnv) {
+    Write-Host "Syncing LLM env keys from ../comm-assistant/.env ..."
+    & .\.venv\Scripts\python.exe .\scripts\sync_llm_env_from_comm_assistant.py
+} else {
+    Write-Host "No ../comm-assistant/.env found — set GROQ_API_KEY / LLM_* in .env manually." -ForegroundColor Yellow
 }
 
 New-Item -ItemType Directory -Force -Path output | Out-Null
