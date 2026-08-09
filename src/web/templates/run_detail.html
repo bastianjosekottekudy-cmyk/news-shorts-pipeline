@@ -95,14 +95,16 @@
     {% if run.news is mapping and run.news.title %}
     <p><strong>{{ run.news.title }}</strong></p>
     {% if run.news.link %}
-    <p><a href="{{ run.news.link }}" target="_blank" rel="noopener">{{ run.news.link }}</a></p>
+    <p class="meta"><a href="{{ run.news.link }}" target="_blank" rel="noopener">Open on Google News</a></p>
     {% endif %}
     {% elif run.news is iterable and run.news is not string %}
     <ol class="trends-list">
       {% for item in run.news %}
       <li>
         <strong>{{ item.title }}</strong>
-        {% if item.link %}<br><a href="{{ item.link }}" target="_blank" rel="noopener">{{ item.link }}</a>{% endif %}
+        {% if item.link %}
+        <br><a href="{{ item.link }}" target="_blank" rel="noopener">Open on Google News</a>
+        {% endif %}
       </li>
       {% endfor %}
     </ol>

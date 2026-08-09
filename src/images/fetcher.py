@@ -12,6 +12,7 @@ from urllib.parse import quote
 import httpx
 
 from src.config import load_pipeline_config
+from src.images.keywords import heuristic_image_queries
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +26,18 @@ WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 OPENVERSE_API = "https://api.openverse.org/v1/images/"
 WIKI_SUMMARY = "https://en.wikipedia.org/api/rest_v1/page/summary/"
 
+_LOW_VALUE_URL_RE = re.compile(
+    r"(?:^|/)(?:logo|icon|sprite|favicon|badge)(?:[._/-]|$)|\.svg(?:\?|$)",
+    re.IGNORECASE,
+)
+
 
 def _safe_stem(text: str) -> str:
     return re.sub(r"[^\w\-]+", "_", text)[:40].strip("_") or "news"
+
+
+def _is_low_value_url(url: str) -> bool:
+    return bool(_LOW_VALUE_URL_RE.search(url or ""))
 
 
 def _download_image(client: httpx.Client, url: str, dest: Path) -> bool:
@@ -151,6 +161,8 @@ def _wikipedia_thumbnail(client: httpx.Client, query: str) -> str | None:
     candidates = ["_".join(terms)] if terms else []
     if terms:
         candidates.append(terms[0])
+        if len(terms) >= 2:
+            candidates.append("_".join(terms[:2]))
     for term in candidates:
         try:
             resp = client.get(
@@ -199,35 +211,20 @@ def _og_image_url(client: httpx.Client, page_url: str) -> str | None:
     return None
 
 
-def _search_queries_from_title(title: str) -> list[str]:
-    cleaned = re.sub(r"\s*[\|\-–—]\s*.*$", "", title or "").strip()
-    # Drop common filler words for better stock/wiki hits
-    stop = {
-        "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "are",
-        "this", "that", "with", "from", "why", "how", "what", "when", "after",
-        "into", "its", "it", "as", "at", "by", "be", "was", "were", "has", "have",
-        "new", "now", "just", "about", "over", "under", "up", "down",
-    }
-    words = [
-        w for w in re.findall(r"[A-Za-z0-9]{3,}", cleaned)
-        if w.lower() not in stop
-    ]
+def _resolve_story_queries(news_item: dict[str, Any]) -> tuple[str, list[str]]:
+    raw_queries = news_item.get("image_queries")
+    entity = str(news_item.get("primary_entity") or "").strip()
     queries: list[str] = []
-    if len(words) >= 2:
-        queries.append(" ".join(words[:3]))
-    if words:
-        queries.append(words[0])
-    if not queries:
-        queries.append(cleaned[:40] or "news")
-    # Unique preserve order
-    seen: set[str] = set()
-    out: list[str] = []
-    for q in queries:
-        key = q.lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(q)
-    return out
+    if isinstance(raw_queries, list):
+        for q in raw_queries:
+            text = str(q or "").strip()
+            if text and text.lower() not in {x.lower() for x in queries}:
+                queries.append(text)
+    if queries:
+        if not entity:
+            entity = queries[0]
+        return entity, queries
+    return heuristic_image_queries(str(news_item.get("title") or "news"))
 
 
 def _make_placeholder(dest: Path, label: str) -> None:
@@ -258,16 +255,24 @@ def fetch_images_for_news(
     """
     config = load_pipeline_config()
     max_images = int(config.get("max_images_per_short", 4))
-    providers = config.get("images", {}).get(
-        "providers", ["news_og", "wikimedia", "openverse"]
-    )
+    img_cfg = config.get("images") or {}
+    providers = img_cfg.get("providers", ["news_og", "wikimedia", "openverse"])
+    # Prefer fewer downloads aligned with renderer (uses up to 2).
+    max_images = min(max_images, 3) if max_images > 3 else max_images
 
     images_dir = output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
     title = str(news_item.get("title") or "news")
     link = str(news_item.get("link") or "")
-    queries = _search_queries_from_title(title)
+    primary_entity, queries = _resolve_story_queries(news_item)
     stem = _safe_stem(title)
+
+    logger.info(
+        "Image search for '%s' entity=%r queries=%s",
+        title[:50],
+        primary_entity,
+        queries,
+    )
 
     if mock:
         saved: list[str] = []
@@ -281,6 +286,7 @@ def fetch_images_for_news(
         return saved
 
     urls: list[str] = []
+    low_value: list[str] = []
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
@@ -294,22 +300,43 @@ def fetch_images_for_news(
                 news_item["resolved_link"] = article_url
             og = _og_image_url(client, article_url)
             if og:
-                urls.append(og)
-                logger.info("Got og:image for short")
+                if _is_low_value_url(og):
+                    low_value.append(og)
+                else:
+                    urls.append(og)
+                    logger.info("Got og:image for short")
 
-        # 2) Wikipedia thumbnail (often works when Commons API is blocked)
-        if len(urls) < max_images:
-            for q in queries:
+        wiki_enabled = "wikimedia" in providers or "wikipedia" in providers
+        search_order = []
+        if primary_entity:
+            search_order.append(primary_entity)
+        for q in queries:
+            if q.lower() not in {x.lower() for x in search_order}:
+                search_order.append(q)
+
+        # 2) Wikipedia thumbnail on primary entity first
+        if len(urls) < max_images and wiki_enabled:
+            for q in search_order:
                 thumb = _wikipedia_thumbnail(client, q)
-                if thumb and thumb not in urls:
+                if not thumb:
+                    continue
+                if _is_low_value_url(thumb):
+                    if thumb not in low_value:
+                        low_value.append(thumb)
+                    continue
+                if thumb not in urls:
                     urls.append(thumb)
                 if len(urls) >= max_images:
                     break
 
         # 3) Wikimedia Commons
         if len(urls) < max_images and "wikimedia" in providers:
-            for q in queries:
+            for q in search_order:
                 for url in _wikimedia_urls(client, q, max_images):
+                    if _is_low_value_url(url):
+                        if url not in low_value:
+                            low_value.append(url)
+                        continue
                     if url not in urls:
                         urls.append(url)
                     if len(urls) >= max_images:
@@ -317,16 +344,27 @@ def fetch_images_for_news(
                 if len(urls) >= max_images:
                     break
 
-        # 4) Openverse stock photos keyed to headline keywords
+        # 4) Openverse stock photos
         if len(urls) < max_images and "openverse" in providers:
-            for q in queries:
+            for q in search_order:
                 for url in _openverse_urls(client, q, max_images):
+                    if _is_low_value_url(url):
+                        if url not in low_value:
+                            low_value.append(url)
+                        continue
                     if url not in urls:
                         urls.append(url)
                     if len(urls) >= max_images:
                         break
                 if len(urls) >= max_images:
                     break
+
+        # Fill remaining with low-value only if nothing better
+        for url in low_value:
+            if len(urls) >= max_images:
+                break
+            if url not in urls:
+                urls.append(url)
 
         saved: list[str] = []
         for i, url in enumerate(urls[:max_images], start=1):
@@ -347,7 +385,15 @@ def fetch_images_for_news(
         saved.append(str(dest))
 
     (output_dir / "images.json").write_text(
-        json.dumps(saved, indent=2), encoding="utf-8"
+        json.dumps(
+            {
+                "paths": saved,
+                "primary_entity": primary_entity,
+                "image_queries": queries,
+            },
+            indent=2,
+            ),
+        encoding="utf-8",
     )
     logger.info("Images for short '%s': %s", title[:60], len(saved))
     return saved

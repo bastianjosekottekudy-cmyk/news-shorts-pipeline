@@ -31,6 +31,8 @@ script:
 
 images:
   providers: [news_og, wikimedia, openverse]
+  llm_keywords: true
+  max_queries_per_story: 3
 
 # Same YouTube channel as trends-video-pipeline — use shared secrets/
 youtube:

@@ -18,10 +18,11 @@ from src.config import (
 )
 from src.db import store
 from src.images.fetcher import fetch_images_for_news
+from src.images.keywords import enrich_news_with_image_queries
 from src.naming import build_video_title
 from src.news.fetcher import fetch_section_news
 from src.script.generator import generate_script
-from src.titles.clarity import generate_display_title
+from src.titles.clarity import clarify_news_titles, generate_display_title
 from src.video.renderer import render_short
 
 logger = logging.getLogger(__name__)
@@ -145,11 +146,22 @@ def run_single_short(
             "start",
             f"{video_title} — {len(news_items)} stor{'y' if len(news_items)==1 else 'ies'}",
         )
+
+        store.append_step_log(run_id, "titles", "Clarifying news headlines")
+        news_items = clarify_news_titles(section, news_items)
         store.update_run(
             run_id,
             news_json=json.dumps(news_items),
             news_link=str(news_items[0].get("link") or ""),
             news_title=primary_title,
+        )
+
+        store.append_step_log(run_id, "image_keywords", "Extracting image search keywords")
+        news_items = enrich_news_with_image_queries(section, news_items)
+        store.update_run(
+            run_id,
+            news_json=json.dumps(news_items),
+            news_link=str(news_items[0].get("link") or ""),
         )
 
         store.append_step_log(run_id, "images", "Fetching related images per story")
@@ -160,7 +172,7 @@ def run_single_short(
             imgs = fetch_images_for_news(item, story_dir, mock=mock_images)
             images_by_story.append(imgs)
 
-        store.append_step_log(run_id, "titles", "Writing on-screen titles")
+        store.append_step_log(run_id, "overlay", "Writing on-screen titles")
         display_title = generate_display_title(
             section.name,
             run_date,
