@@ -702,7 +702,6 @@ def generate_script(
     config = load_pipeline_config()
     script_cfg = config.get("script", {})
     provider = str(script_cfg.get("provider", "chain")).lower()
-    yaml_model = str(script_cfg.get("model", "openai/gpt-oss-20b"))
     max_words = _max_words()
 
     used_provider = "template"
@@ -712,7 +711,7 @@ def generate_script(
 
     if provider != "template":
         try:
-            chain = get_llm_chain(yaml_model=yaml_model)
+            chain = get_llm_chain()
             segments, used_endpoint, last_error = _fill_narration_with_chain(
                 chain, section, news_items, max_words
             )
@@ -759,7 +758,7 @@ def generate_script(
             {
                 "provider": used_provider,
                 "endpoint": used_endpoint,
-                "model": yaml_model if used_provider != "template" else None,
+                "model": used_endpoint if used_provider != "template" else None,
                 "last_error": last_error,
                 "word_count": _word_count(script),
                 "max_words": max_words,

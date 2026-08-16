@@ -66,17 +66,30 @@ def _parse_endpoint_spec(spec: str) -> tuple[str, str]:
 
 def default_model(provider: str) -> str:
     if provider == "gemini":
-        return "gemini-flash-lite-latest"
+        return "gemini-3.5-flash"
     if provider == "groq":
         # Groq shut down llama-3.1-8b-instant / llama-3.3-70b-versatile (2026-08-16).
-        return "openai/gpt-oss-20b"
+        return "openai/gpt-oss-120b"
     if provider == "openrouter":
-        return "meta-llama/llama-3.3-70b-instruct:free"
+        return "google/gemma-4-26b-a4b-it:free"
     if provider in {"openai", "openai_compatible", "compatible"}:
         return "gpt-4o-mini"
     if provider == "ollama":
         return _env("OLLAMA_MODEL", default="qwen3:8b") or "qwen3:8b"
     return "template"
+
+
+# Shared quality-first order for narration, titles, and image keywords.
+# Overridden only by env LLM_CHAIN (or LLM_PROVIDER + LLM_FALLBACKS).
+DEFAULT_LLM_CHAIN: tuple[tuple[str, str], ...] = (
+    ("gemini", "gemini-3.5-flash"),
+    ("groq", "openai/gpt-oss-120b"),
+    ("gemini", "gemini-flash-latest"),
+    ("gemini", "gemini-3.5-flash-lite"),
+    ("groq", "openai/gpt-oss-20b"),
+    ("gemini", "gemini-flash-lite-latest"),
+    ("openrouter", "google/gemma-4-26b-a4b-it:free"),
+)
 
 
 # Free/dev-tier Groq IDs shut down 2026-08-16 → official replacements.
@@ -99,21 +112,27 @@ def _canonicalize_model(provider: str, model: str) -> str:
 def parse_llm_chain_specs(*, yaml_model: str | None = None) -> list[tuple[str, str]]:
     """
     Parse LLM chain env. Always ends with ``template``.
-    If no env chain is set, default to groq/(yaml_model or openai/gpt-oss-20b).
+
+    Priority:
+    1. ``LLM_CHAIN`` CSV
+    2. ``LLM_PROVIDER`` / ``LLM_MODEL`` + ``LLM_FALLBACKS``
+    3. ``DEFAULT_LLM_CHAIN`` (same order everywhere: narration, titles, keywords)
     """
+    del yaml_model  # kept for call-site compatibility; order comes from env/defaults
     chain_raw = _env("LLM_CHAIN")
     if chain_raw:
         specs = [_parse_endpoint_spec(s) for s in _split_csv(chain_raw)]
-    else:
-        primary_provider = (_env("LLM_PROVIDER") or "groq").lower()
+    elif _env("LLM_PROVIDER") or _env("LLM_MODEL") or _env("LLM_FALLBACKS"):
+        primary_provider = (_env("LLM_PROVIDER") or "gemini").lower()
         primary_model = (
             _env("LLM_MODEL")
-            or (yaml_model or "").strip()
             or default_model(primary_provider)
         )
         specs = [(primary_provider, primary_model)]
         for item in _split_csv(_env("LLM_FALLBACKS")):
             specs.append(_parse_endpoint_spec(item))
+    else:
+        specs = list(DEFAULT_LLM_CHAIN)
 
     remote: list[tuple[str, str]] = []
     ollama_model = default_model("ollama")
@@ -241,10 +260,15 @@ class LLMChain:
         if endpoint.provider == "openrouter":
             headers["HTTP-Referer"] = "https://github.com/news-shorts-pipeline"
             headers["X-Title"] = "News Shorts Pipeline"
-        # gpt-oss burns completion budget on reasoning; leave room for content.
+        # gpt-oss / some Gemini models burn completion budget on hidden reasoning.
         model_l = (endpoint.model or "").lower()
         is_gpt_oss = "gpt-oss" in model_l
-        token_budget = max(max_tokens, 1536 if is_gpt_oss else max_tokens)
+        is_gemini_thinking = endpoint.provider == "gemini" and (
+            ("3.5-flash" in model_l and "lite" not in model_l)
+            or "gemini-pro" in model_l
+        )
+        min_budget = 1536 if (is_gpt_oss or is_gemini_thinking) else max_tokens
+        token_budget = max(max_tokens, min_budget)
         payload: dict[str, Any] = {
             "model": endpoint.model,
             "temperature": temperature,

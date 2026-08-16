@@ -24,7 +24,8 @@ tts:
 
 script:
   provider: chain   # chain | groq (alias) | template
-  model: openai/gpt-oss-20b   # used only when LLM_PROVIDER/LLM_CHAIN unset
+  # Model order comes from env LLM_CHAIN (quality-first). This field is unused when LLM_CHAIN is set.
+  model: gemini-3.5-flash
   style: natural human news Shorts host speaking in complete sentences; explain each story clearly; do not re-read on-screen headlines; never name outlets or say website domains/.com
   intro_template: "Here are today's top {n} {section} stories."
   outro_template: "Thanks for watching. Follow for more English news Shorts."

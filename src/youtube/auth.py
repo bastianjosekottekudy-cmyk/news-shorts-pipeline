@@ -7,6 +7,8 @@ import hashlib
 import json
 import logging
 import secrets
+import subprocess
+import sys
 import time
 import webbrowser
 import wsgiref.simple_server
@@ -190,6 +192,7 @@ def probe_client_status(
             )
         except RefreshError as exc:
             if _is_invalid_grant(exc):
+                _clear_stale_token(client.token)
                 return _status_dict(
                     client,
                     "needs_reauth",
@@ -292,6 +295,17 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
         result["needs_browser"] = False
         return result
     except RefreshError as exc:
+        if _is_invalid_grant(exc):
+            _clear_stale_token(client.token)
+            result = _status_dict(
+                client,
+                "needs_reauth",
+                detail="Refresh token revoked — re-authorize in browser",
+                can_refresh=True,
+            )
+            result["ok"] = False
+            result["needs_browser"] = True
+            return result
         result = _status_dict(
             client,
             "needs_reauth",
@@ -311,6 +325,65 @@ def try_silent_refresh(client_id: str) -> dict[str, Any]:
         result["ok"] = False
         result["needs_browser"] = True
         return result
+
+
+def authorize_client_interactive(client_id: str) -> dict[str, Any]:
+    """
+    Open Google login via Desktop loopback and save the token.
+
+    Skips token.json / YOUTUBE_REFRESH_TOKEN so a revoked refresh token cannot
+    block re-auth. Desktop clients require localhost loopback (not the dashboard
+    callback URL).
+    """
+    client = get_youtube_client(client_id)
+    if not client.client_secrets.is_file():
+        raise FileNotFoundError(
+            f"YouTube client secrets not found for {client.id} at {client.client_secrets}"
+        )
+    if client.token.is_file():
+        _clear_stale_token(client.token)
+
+    logger.info("Opening Google OAuth browser for YouTube client %s", client.id)
+    creds = _run_browser_oauth(client.client_secrets)
+    _save_token(creds, client.token)
+    if client.id == "primary" and creds.refresh_token:
+        logger.info(
+            "Primary authorized. Update .env YOUTUBE_REFRESH_TOKEN if you use it "
+            "(old value was revoked)."
+        )
+
+    result = probe_client_status(client, attempt_refresh=False)
+    result["ok"] = result.get("status") == "ok"
+    result["needs_browser"] = False
+    if not result["ok"]:
+        result["detail"] = (
+            result.get("detail") or "Authorization did not produce a valid token"
+        )
+    else:
+        result["detail"] = "Authorized successfully"
+    return result
+
+
+def _open_auth_browser(url: str) -> None:
+    """Best-effort open of the system browser (uvicorn threads can be flaky)."""
+    opened = False
+    try:
+        opened = bool(webbrowser.open(url, new=1, autoraise=True))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("webbrowser.open failed: %s", exc)
+    if sys.platform == "win32":
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", url],
+                close_fds=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            opened = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cmd start browser failed: %s", exc)
+    if not opened:
+        logger.warning("Could not auto-open browser — use the auth URL from the logs")
 
 
 def _pkce_pair() -> tuple[str, str]:
@@ -424,9 +497,9 @@ def _run_browser_oauth(client_path: Path) -> Credentials:
         auth_url, _ = flow.authorization_url(
             access_type="offline", prompt="consent"
         )
-        webbrowser.open(auth_url, new=1, autoraise=True)
         logger.info("Please visit this URL to authorize this application: %s", auth_url)
-        print(f"Please visit this URL to authorize this application: {auth_url}")
+        print(f"Please visit this URL to authorize this application: {auth_url}", flush=True)
+        _open_auth_browser(auth_url)
         local_server.handle_request()
         if not wsgi_app.last_request_uri:
             raise RuntimeError("Timed out waiting for OAuth browser callback")
@@ -573,7 +646,15 @@ def main() -> None:
     client = get_youtube_client(args.client)
     client.token.parent.mkdir(parents=True, exist_ok=True)
 
-    if not args.force and client.token.exists():
+    if args.force:
+        result = authorize_client_interactive(client.id)
+        if not result.get("ok"):
+            raise SystemExit(result.get("detail") or "Authorization failed")
+        print(f"Authenticated successfully ({client.id}).")
+        print(f"Token saved to: {client.token}")
+        return
+
+    if client.token.exists():
         try:
             probe = Credentials.from_authorized_user_file(str(client.token), SCOPES)
             if probe and probe.expired and probe.refresh_token:
@@ -601,12 +682,12 @@ def main() -> None:
             )
             _clear_stale_token(client.token)
 
-    creds = get_credentials_for_client(client, allow_browser=True)
+    # Missing/invalid token: prefer interactive browser (skips revoked env refresh).
+    result = authorize_client_interactive(client.id)
+    if not result.get("ok"):
+        raise SystemExit(result.get("detail") or "Authorization failed")
     print(f"Authenticated successfully ({client.id}).")
     print(f"Token saved to: {client.token}")
-    if client.id == "primary" and creds.refresh_token:
-        print(f"YOUTUBE_REFRESH_TOKEN={creds.refresh_token}")
-        print("Update .env with the refresh token above (shared with trends pipeline).")
 
 
 if __name__ == "__main__":

@@ -71,7 +71,7 @@
   <section class="panel youtube-auth-panel {% if youtube_auth_warning %}youtube-auth-warning{% endif %}">
     <div class="panel-head">
       <h2>YouTube auth</h2>
-      <p class="hint">OAuth clients used for upload failover. Refresh tries a silent token refresh; if that fails, Google sign-in opens in this browser.</p>
+      <p class="hint">OAuth clients used for upload failover. Refresh tries a silent token refresh; if that fails, a Google sign-in window opens (Desktop localhost flow).</p>
     </div>
     {% if youtube_flash %}
     <p class="youtube-flash">{{ youtube_flash }}</p>
@@ -337,8 +337,18 @@
           return;
         }
         if (data.needs_browser) {
-          status.textContent = clientId + ': opening Google sign-in…';
-          window.location.href = '/api/youtube/clients/' + encodeURIComponent(clientId) + '/authorize';
+          status.textContent = clientId + ': complete Google sign-in in the browser window that opens…';
+          const authRes = await fetch(
+            '/api/youtube/clients/' + encodeURIComponent(clientId) + '/authorize',
+            { method: 'POST' }
+          );
+          const authData = await authRes.json().catch(() => ({}));
+          if (!authRes.ok || !authData.ok) {
+            status.textContent = authData.detail || 'Authorization failed';
+            return;
+          }
+          status.textContent = clientId + ': authorized — reloading…';
+          setTimeout(() => location.reload(), 600);
           return;
         }
         status.textContent = data.detail || 'Refresh failed';
