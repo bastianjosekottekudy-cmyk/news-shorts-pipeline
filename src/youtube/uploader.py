@@ -1,4 +1,4 @@
-"""YouTube Shorts upload — same OAuth/secrets as trends-video-pipeline."""
+"""YouTube Shorts upload — multi-client OAuth failover."""
 
 from __future__ import annotations
 
@@ -11,7 +11,11 @@ from googleapiclient.http import MediaFileUpload
 
 from src.config import Section, get_env, load_pipeline_config
 from src.naming import build_video_title, sanitize_news_title
-from src.youtube.auth import get_credentials
+from src.youtube.auth import (
+    YouTubeClient,
+    get_credentials_for_client,
+    list_youtube_clients,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,42 +60,52 @@ def youtube_enabled() -> bool:
     return bool(config.get("youtube", {}).get("enabled", False))
 
 
-def upload_short(
-    video_path: str,
+def is_retryable_upload_error(exc: BaseException) -> bool:
+    """True when another OAuth client / GCP project may succeed."""
+    text = str(exc).lower()
+    needles = (
+        "429",
+        "quota exceeded",
+        "ratelimitexceeded",
+        "rate limit",
+        "uploadlimitexceeded",
+        "invalid_grant",
+        "expired or revoked",
+        "auth failed",
+        "refresherror",
+        "credentials",
+        "token",
+        "oauth",
+        "connection",
+        "timeout",
+        "timed out",
+        "max retries exceeded",
+        "temporarily unavailable",
+        "backenderror",
+        "internalerror",
+        "503",
+        "500",
+    )
+    return any(n in text for n in needles)
+
+
+def _upload_with_client(
+    client: YouTubeClient,
+    path: Path,
     section: Section,
-    news_items: list[dict[str, Any]] | dict[str, Any],
+    news_items: list[dict[str, Any]],
     run_date: str,
     *,
-    index: int | None = None,
-    total: int | None = None,
+    index: int | None,
+    total: int | None,
+    yt_cfg: dict[str, Any],
 ) -> str:
-    if isinstance(news_items, dict):
-        news_items = [news_items]
-
-    skip = get_env("SKIP_YOUTUBE_UPLOAD", "false").strip().lower()
-    if skip in ("true", "1", "yes"):
-        raise YouTubeUploadError(
-            "YouTube upload skipped (SKIP_YOUTUBE_UPLOAD=true). "
-            "Set SKIP_YOUTUBE_UPLOAD=false in .env and restart the app."
-        )
-
-    if not youtube_enabled():
-        raise YouTubeUploadError(
-            "YouTube upload is disabled (set youtube.enabled: true in config/pipeline.yaml)"
-        )
-
-    path = Path(video_path)
-    if not path.is_file():
-        raise YouTubeUploadError(f"Video file not found: {video_path}")
-
-    config = load_pipeline_config()
-    yt_cfg = config.get("youtube", {})
-
     try:
-        creds = get_credentials()
+        creds = get_credentials_for_client(client, allow_browser=False)
     except Exception as exc:
         raise YouTubeUploadError(
-            f"YouTube auth failed. Run: python -m src.youtube.auth ({exc})"
+            f"YouTube auth failed for client {client.id}. "
+            f"Run: python -m src.youtube.auth --client {client.id} ({exc})"
         ) from exc
 
     youtube = build("youtube", "v3", credentials=creds)
@@ -123,13 +137,108 @@ def upload_short(
         while response is None:
             status, response = request.next_chunk()
             if status:
-                logger.info("Upload progress: %.1f%%", status.progress() * 100)
+                logger.info(
+                    "Upload progress (%s): %.1f%%",
+                    client.id,
+                    status.progress() * 100,
+                )
     except Exception as exc:
-        raise YouTubeUploadError(f"YouTube API upload failed: {exc}") from exc
+        raise YouTubeUploadError(
+            f"YouTube API upload failed ({client.id}): {exc}"
+        ) from exc
 
     if not response or not response.get("id"):
-        raise YouTubeUploadError("YouTube API returned no video id")
+        raise YouTubeUploadError(
+            f"YouTube API returned no video id ({client.id})"
+        )
 
     video_id = response["id"]
-    logger.info("Uploaded Short: https://youtube.com/watch?v=%s", video_id)
+    logger.info(
+        "Uploaded Short via %s: https://youtube.com/watch?v=%s",
+        client.id,
+        video_id,
+    )
     return video_id
+
+
+def upload_short(
+    video_path: str,
+    section: Section,
+    news_items: list[dict[str, Any]] | dict[str, Any],
+    run_date: str,
+    *,
+    index: int | None = None,
+    total: int | None = None,
+) -> str:
+    if isinstance(news_items, dict):
+        news_items = [news_items]
+
+    skip = get_env("SKIP_YOUTUBE_UPLOAD", "false").strip().lower()
+    if skip in ("true", "1", "yes"):
+        raise YouTubeUploadError(
+            "YouTube upload skipped (SKIP_YOUTUBE_UPLOAD=true). "
+            "Set SKIP_YOUTUBE_UPLOAD=false in .env and restart the app."
+        )
+
+    if not youtube_enabled():
+        raise YouTubeUploadError(
+            "YouTube upload is disabled (set youtube.enabled: true in config/pipeline.yaml)"
+        )
+
+    path = Path(video_path)
+    if not path.is_file():
+        raise YouTubeUploadError(f"Video file not found: {video_path}")
+
+    config = load_pipeline_config()
+    yt_cfg = config.get("youtube", {})
+    clients = list_youtube_clients()
+    if not clients:
+        raise YouTubeUploadError("No YouTube OAuth clients configured")
+
+    errors: list[str] = []
+    for i, client in enumerate(clients):
+        try:
+            logger.info(
+                "YouTube upload attempt via client %s (%s/%s)",
+                client.id,
+                i + 1,
+                len(clients),
+            )
+            return _upload_with_client(
+                client,
+                path,
+                section,
+                news_items,
+                run_date,
+                index=index,
+                total=total,
+                yt_cfg=yt_cfg,
+            )
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            errors.append(f"{client.id}: {msg}")
+            has_next = i + 1 < len(clients)
+            if has_next and is_retryable_upload_error(exc):
+                logger.warning(
+                    "YouTube client %s failed (retryable) — trying next: %s",
+                    client.id,
+                    msg[:240],
+                )
+                continue
+            if has_next:
+                logger.error(
+                    "YouTube client %s failed (non-retryable) — stopping: %s",
+                    client.id,
+                    msg[:240],
+                )
+                raise YouTubeUploadError(msg) from exc
+            logger.error(
+                "YouTube client %s failed (last in chain): %s",
+                client.id,
+                msg[:240],
+            )
+
+    summary = " | ".join(errors) if errors else "unknown error"
+    raise YouTubeUploadError(
+        f"All YouTube OAuth clients failed ({len(clients)}): {summary}"
+    )

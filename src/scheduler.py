@@ -15,11 +15,13 @@ from src.config import load_sections
 
 logger = logging.getLogger(__name__)
 
-# All sections share India Standard Time schedule (morning + evening).
+# All sections share India Standard Time schedule (evening only).
 SCHEDULE_TIMEZONE = "Asia/Kolkata"
-SCHEDULE_HOURS = (10, 22)  # 10:00 AM and 10:00 PM IST
+SCHEDULE_HOURS = (22,)  # 10:00 PM IST
 UPLOAD_RETRY_JOB_ID = "retry-failed-uploads"
 UPLOAD_RETRY_INTERVAL_HOURS = 1
+
+_HOUR_LABELS = {22: "10:00 PM"}
 
 _scheduler: BackgroundScheduler | None = None
 _retry_uploads_callback: Callable[[], None] | None = None
@@ -85,7 +87,7 @@ def start_scheduler(
     *,
     retry_uploads_callback: Callable[[], None] | None = None,
 ) -> BackgroundScheduler:
-    """Section jobs at 10 AM/PM IST; upload retries only while failures exist."""
+    """Section jobs at 10:00 PM IST; upload retries only while failures exist."""
     global _scheduler, _retry_uploads_callback
     if _scheduler and _scheduler.running:
         return _scheduler
@@ -93,9 +95,9 @@ def start_scheduler(
     scheduler = BackgroundScheduler()
     for section in load_sections():
         for hour in SCHEDULE_HOURS:
-            period = "1000" if hour == 10 else "2200"
+            period = f"{hour:02d}00"
             job_id = f"daily-{section.code}-{period}"
-            label = "10:00 AM" if hour == 10 else "10:00 PM"
+            label = _HOUR_LABELS.get(hour, f"{hour:02d}:00")
             scheduler.add_job(
                 run_callback,
                 trigger=CronTrigger(
@@ -144,9 +146,8 @@ def get_next_run_times() -> list[dict[str, str]]:
         if current is None or next_run < current:
             by_section[section_code] = next_run
 
-    morning_local = _format_local_clock(10)
-    evening_local = _format_local_clock(22)
-    schedule_label = f"daily {morning_local} & {evening_local} (system)"
+    clocks = " & ".join(_format_local_clock(h) for h in SCHEDULE_HOURS)
+    schedule_label = f"daily {clocks} (system)"
 
     result: list[dict[str, str]] = []
     for section_code, next_run in by_section.items():

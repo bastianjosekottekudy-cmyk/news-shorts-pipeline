@@ -28,13 +28,22 @@ cd C:\Users\USER\Projects\news-shorts-pipeline
 .\scripts\setup-windows.ps1
 ```
 
-Copy `.env` keys from trends (at least `GROQ_API_KEY`). Link or copy YouTube secrets:
+Copy `.env` keys from trends (at least `GROQ_API_KEY`). YouTube OAuth clients are backed up by the personal **google-auth** skill:
 
 ```powershell
-# Prefer sharing trends secrets (same channel)
-New-Item -ItemType Junction -Path secrets -Target ..\trends-video-pipeline\secrets -Force
-# Or copy client_secrets.json + token.json into secrets/
+python "$env:USERPROFILE\.cursor\skills\google-auth\scripts\bootstrap.py" --from . --service youtube
+python "$env:USERPROFILE\.cursor\skills\google-auth\scripts\sync.py" --project . --service youtube --write-yaml
+python "$env:USERPROFILE\.cursor\skills\google-auth\scripts\status.py" --project . --service youtube
 ```
+
+Upload failover: `youtube.clients` in `config/pipeline.yaml` tries OAuth clients in order when quota/auth fails. Authorize each once:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.youtube.auth --client primary
+.\.venv\Scripts\python.exe -m src.youtube.auth --client backup1
+```
+
+Add another later: put `secrets/clients/backup2/client_secrets.json`, append a yaml entry, then `auth --client backup2`.
 
 Then:
 

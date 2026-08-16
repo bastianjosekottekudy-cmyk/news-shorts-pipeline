@@ -6,13 +6,15 @@ import json
 import logging
 import shutil
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -27,6 +29,13 @@ from src.db import store
 from src.naming import title_from_video_path
 from src.pipeline import run_section_batch
 from src.scheduler import get_next_run_times
+from src.youtube.auth import (
+    DEFAULT_WEB_REDIRECT_URI,
+    build_web_oauth_authorization,
+    exchange_web_oauth_code,
+    probe_youtube_clients,
+    try_silent_refresh,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +49,26 @@ _running_lock = threading.Lock()
 _running_sections: set[str] = set()
 _upload_lock = threading.Lock()
 _uploading_runs: set[int] = set()
+_oauth_pending_lock = threading.Lock()
+# state -> {client_id, code_verifier, redirect_uri, created_at}
+_oauth_pending: dict[str, dict[str, Any]] = {}
+_OAUTH_PENDING_TTL_SEC = 600
 
 
 def _youtube_enabled() -> bool:
     return bool(load_pipeline_config().get("youtube", {}).get("enabled", False))
+
+
+def _purge_stale_oauth_pending() -> None:
+    now = time.time()
+    with _oauth_pending_lock:
+        stale = [
+            key
+            for key, val in _oauth_pending.items()
+            if now - float(val.get("created_at") or 0) > _OAUTH_PENDING_TTL_SEC
+        ]
+        for key in stale:
+            _oauth_pending.pop(key, None)
 
 
 def _parse_json_field(value: str | None) -> Any:
@@ -356,6 +381,7 @@ async def index(
     request: Request,
     section: str | None = None,
     date: str | None = None,
+    youtube_flash: str | None = None,
 ) -> HTMLResponse:
     runs = [
         _enrich_run(r)
@@ -371,6 +397,14 @@ async def index(
         any(r.get("upload_status") == "uploading" for r in runs)
         or stats.get("uploading", 0) > 0
     )
+    youtube_on = _youtube_enabled()
+    youtube_clients: list[dict[str, Any]] = []
+    if youtube_on:
+        try:
+            youtube_clients = probe_youtube_clients(attempt_refresh=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("YouTube client probe failed: %s", exc)
+            youtube_clients = []
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -384,7 +418,12 @@ async def index(
             "filter_date": date or "",
             "has_running": has_running,
             "has_uploading": has_uploading,
-            "youtube_enabled": _youtube_enabled(),
+            "youtube_enabled": youtube_on,
+            "youtube_clients": youtube_clients,
+            "youtube_auth_warning": any(
+                c.get("status") != "ok" for c in youtube_clients
+            ),
+            "youtube_flash": youtube_flash or "",
         },
     )
 
@@ -406,6 +445,98 @@ async def run_detail(request: Request, run_id: int) -> HTMLResponse:
         request,
         "run_detail.html",
         {"run": run},
+    )
+
+
+@app.get("/api/youtube/status")
+async def youtube_status() -> JSONResponse:
+    if not _youtube_enabled():
+        return JSONResponse({"enabled": False, "clients": []})
+    return JSONResponse(
+        {
+            "enabled": True,
+            "clients": probe_youtube_clients(attempt_refresh=False),
+        }
+    )
+
+
+@app.post("/api/youtube/clients/{client_id}/refresh")
+async def youtube_client_refresh(client_id: str) -> JSONResponse:
+    if not _youtube_enabled():
+        raise HTTPException(status_code=400, detail="YouTube upload is disabled")
+    try:
+        result = try_silent_refresh(client_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+@app.get("/api/youtube/clients/{client_id}/authorize")
+async def youtube_client_authorize(client_id: str) -> RedirectResponse:
+    if not _youtube_enabled():
+        raise HTTPException(status_code=400, detail="YouTube upload is disabled")
+    _purge_stale_oauth_pending()
+    try:
+        started = build_web_oauth_authorization(
+            client_id, redirect_uri=DEFAULT_WEB_REDIRECT_URI
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    with _oauth_pending_lock:
+        _oauth_pending[started["state"]] = {
+            "client_id": started["client_id"],
+            "code_verifier": started["code_verifier"],
+            "redirect_uri": started["redirect_uri"],
+            "created_at": time.time(),
+        }
+    return RedirectResponse(started["auth_url"], status_code=302)
+
+
+@app.get("/api/youtube/oauth/callback")
+async def youtube_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    if error:
+        msg = quote(f"YouTube auth cancelled or failed: {error}")
+        return RedirectResponse(f"/?youtube_flash={msg}", status_code=302)
+    if not code or not state:
+        return RedirectResponse(
+            "/?youtube_flash=" + quote("YouTube auth missing code/state"),
+            status_code=302,
+        )
+
+    _purge_stale_oauth_pending()
+    with _oauth_pending_lock:
+        pending = _oauth_pending.pop(state, None)
+    if not pending:
+        return RedirectResponse(
+            "/?youtube_flash=" + quote("YouTube auth session expired — try Refresh again"),
+            status_code=302,
+        )
+
+    client_id = str(pending["client_id"])
+    try:
+        exchange_web_oauth_code(
+            client_id,
+            code=code,
+            code_verifier=str(pending["code_verifier"]),
+            redirect_uri=str(pending.get("redirect_uri") or DEFAULT_WEB_REDIRECT_URI),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("YouTube OAuth callback failed for %s: %s", client_id, exc)
+        return RedirectResponse(
+            "/?youtube_flash=" + quote(f"{client_id}: auth failed ({exc})"),
+            status_code=302,
+        )
+
+    return RedirectResponse(
+        "/?youtube_flash=" + quote(f"{client_id}: authorized successfully"),
+        status_code=302,
     )
 
 

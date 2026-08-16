@@ -13,7 +13,7 @@
 #   youtube_tags   - tags appended on upload
 #
 # Always produces exactly 1 Short per section covering all fetched headlines.
-# All sections run daily at 10:00 AM and 10:00 PM India Standard Time (Asia/Kolkata).
+# All sections run daily at 10:00 PM India Standard Time (Asia/Kolkata).
 
 sections:
   - code: tech

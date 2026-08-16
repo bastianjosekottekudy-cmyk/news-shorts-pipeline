@@ -35,7 +35,7 @@ def main() -> None:
     port = int(web_cfg.get("port", 8081))
 
     start_scheduler(_scheduled_run, retry_uploads_callback=_retry_failed_uploads)
-    logger.info("Scheduler started — daily 10:00 AM and 10:00 PM IST for every section")
+    logger.info("Scheduler started — daily 10:00 PM IST for every section")
     failed_uploads = store.count_failed_uploads()
     if failed_uploads:
         logger.info(

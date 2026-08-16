@@ -48,7 +48,7 @@
       <p class="hint">
         Each section fetches top headlines (<code>news_count</code>, default 5)
         into one Short. Title: <code>Top Entertainment August 2, 2026</code>.
-        Scheduled daily at <strong>10:00 AM</strong> and <strong>10:00 PM India time</strong>
+        Scheduled daily at <strong>10:00 PM India time</strong>
         for every section. English headlines and narration only.
         {% if youtube_enabled %}
         Auto-uploads to the same YouTube channel as the trends pipeline when auth is configured.
@@ -66,6 +66,37 @@
     </div>
     <p id="trigger-status" class="hint"></p>
   </section>
+
+  {% if youtube_enabled %}
+  <section class="panel youtube-auth-panel {% if youtube_auth_warning %}youtube-auth-warning{% endif %}">
+    <div class="panel-head">
+      <h2>YouTube auth</h2>
+      <p class="hint">OAuth clients used for upload failover. Refresh tries a silent token refresh; if that fails, Google sign-in opens in this browser.</p>
+    </div>
+    {% if youtube_flash %}
+    <p class="youtube-flash">{{ youtube_flash }}</p>
+    {% endif %}
+    <ul class="youtube-client-list">
+      {% for client in youtube_clients %}
+      <li class="youtube-client-row">
+        <div>
+          <strong>{{ client.id }}</strong>
+          <span class="badge badge-yt-{{ client.status }}">{{ client.status }}</span>
+          {% if client.detail %}
+          <p class="meta">{{ client.detail }}</p>
+          {% endif %}
+        </div>
+        {% if client.can_refresh %}
+        <button type="button" class="btn btn-small" onclick="refreshYoutubeClient({{ client.id|tojson }})">Refresh</button>
+        {% endif %}
+      </li>
+      {% else %}
+      <li class="hint">No YouTube clients configured.</li>
+      {% endfor %}
+    </ul>
+    <p id="youtube-auth-status" class="hint"></p>
+  </section>
+  {% endif %}
 
   <section class="panel filters-panel">
     <form method="get" class="filters" id="filter-form">
@@ -113,7 +144,7 @@
   {% if next_runs %}
   <section class="panel schedule-panel">
     <h2>Next scheduled</h2>
-    <p class="hint">10:00 AM &amp; 10:00 PM India time, shown in your system clock. One row per section.</p>
+    <p class="hint">10:00 PM India time, shown in your system clock. One row per section.</p>
     <ul class="schedule-list">
       {% for item in next_runs %}
       <li>
@@ -285,6 +316,34 @@
         }
       } catch (e) {
         alert('Error: ' + e.message);
+      }
+    }
+
+    async function refreshYoutubeClient(clientId) {
+      const status = document.getElementById('youtube-auth-status');
+      status.textContent = 'Refreshing ' + clientId + '…';
+      try {
+        const res = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/refresh', {
+          method: 'POST',
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          status.textContent = data.detail || 'Refresh failed';
+          return;
+        }
+        if (data.ok) {
+          status.textContent = clientId + ': ' + (data.detail || 'ok') + ' — reloading…';
+          setTimeout(() => location.reload(), 600);
+          return;
+        }
+        if (data.needs_browser) {
+          status.textContent = clientId + ': opening Google sign-in…';
+          window.location.href = '/api/youtube/clients/' + encodeURIComponent(clientId) + '/authorize';
+          return;
+        }
+        status.textContent = data.detail || 'Refresh failed';
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
       }
     }
   </script>

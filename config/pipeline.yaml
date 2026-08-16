@@ -24,7 +24,7 @@ tts:
 
 script:
   provider: chain   # chain | groq (alias) | template
-  model: llama-3.1-8b-instant   # used only when LLM_PROVIDER/LLM_CHAIN unset
+  model: openai/gpt-oss-20b   # used only when LLM_PROVIDER/LLM_CHAIN unset
   style: natural human news Shorts host speaking in complete sentences; explain each story clearly; do not re-read on-screen headlines; never name outlets or say website domains/.com
   intro_template: "Here are today's top {n} {section} stories."
   outro_template: "Thanks for watching. Follow for more English news Shorts."
@@ -35,8 +35,22 @@ images:
   max_queries_per_story: 3
 
 # Same YouTube channel as trends-video-pipeline — use shared secrets/
+# Upload tries clients in order (quota/auth fail → next). Auth each once:
+#   python -m src.youtube.auth --client primary
+#   python -m src.youtube.auth --client backup1
+#   python -m src.youtube.auth --client backup2
 youtube:
   enabled: true
   category_id: "25"
   privacy: public
   made_for_kids: false
+  clients:
+    - id: primary
+      client_secrets: secrets/client_secrets.json
+      token: secrets/token.json
+    - id: backup1
+      client_secrets: secrets/clients/backup1/client_secrets.json
+      token: secrets/clients/backup1/token.json
+    - id: backup2
+      client_secrets: secrets/clients/backup2/client_secrets.json
+      token: secrets/clients/backup2/token.json

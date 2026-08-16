@@ -232,7 +232,7 @@ def clarify_news_titles(
             )
 
         text = chain.try_complete(
-            endpoint, system, user, temperature=0.35, max_tokens=900
+            endpoint, system, user, temperature=0.35, max_tokens=1200
         )
         if not text:
             continue

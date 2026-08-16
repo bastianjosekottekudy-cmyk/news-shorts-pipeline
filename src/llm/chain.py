@@ -68,7 +68,8 @@ def default_model(provider: str) -> str:
     if provider == "gemini":
         return "gemini-flash-lite-latest"
     if provider == "groq":
-        return "llama-3.1-8b-instant"
+        # Groq shut down llama-3.1-8b-instant / llama-3.3-70b-versatile (2026-08-16).
+        return "openai/gpt-oss-20b"
     if provider == "openrouter":
         return "meta-llama/llama-3.3-70b-instruct:free"
     if provider in {"openai", "openai_compatible", "compatible"}:
@@ -78,10 +79,27 @@ def default_model(provider: str) -> str:
     return "template"
 
 
+# Free/dev-tier Groq IDs shut down 2026-08-16 → official replacements.
+_GROQ_MODEL_ALIASES = {
+    "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    "llama3-8b-8192": "openai/gpt-oss-20b",
+    "llama3-70b-8192": "openai/gpt-oss-120b",
+    "qwen/qwen3-32b": "openai/gpt-oss-120b",
+}
+
+
+def _canonicalize_model(provider: str, model: str) -> str:
+    model = (model or "").strip()
+    if provider != "groq" or not model:
+        return model
+    return _GROQ_MODEL_ALIASES.get(model, model)
+
+
 def parse_llm_chain_specs(*, yaml_model: str | None = None) -> list[tuple[str, str]]:
     """
     Parse LLM chain env. Always ends with ``template``.
-    If no env chain is set, default to groq/(yaml_model or llama-3.1-8b-instant).
+    If no env chain is set, default to groq/(yaml_model or openai/gpt-oss-20b).
     """
     chain_raw = _env("LLM_CHAIN")
     if chain_raw:
@@ -110,7 +128,9 @@ def parse_llm_chain_specs(*, yaml_model: str | None = None) -> list[tuple[str, s
             if (model or "").strip():
                 ollama_model = model.strip()
             continue
-        model = (model or default_model(provider)).strip()
+        model = _canonicalize_model(
+            provider, (model or default_model(provider)).strip()
+        )
         if remote and remote[-1] == (provider, model):
             continue
         remote.append((provider, model))
@@ -221,21 +241,31 @@ class LLMChain:
         if endpoint.provider == "openrouter":
             headers["HTTP-Referer"] = "https://github.com/news-shorts-pipeline"
             headers["X-Title"] = "News Shorts Pipeline"
+        # gpt-oss burns completion budget on reasoning; leave room for content.
+        model_l = (endpoint.model or "").lower()
+        is_gpt_oss = "gpt-oss" in model_l
+        token_budget = max(max_tokens, 1536 if is_gpt_oss else max_tokens)
         payload: dict[str, Any] = {
             "model": endpoint.model,
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         }
+        if endpoint.provider == "groq" and is_gpt_oss:
+            payload["max_completion_tokens"] = token_budget
+            payload["reasoning_effort"] = "low"
+        else:
+            payload["max_tokens"] = token_budget
         with httpx.Client(timeout=60.0) as client:
             resp = client.post(url, headers=headers, json=payload)
             if resp.status_code >= 400:
                 raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
             data = resp.json()
-        text = data["choices"][0]["message"]["content"]
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        text = message.get("content")
         if isinstance(text, list):
             parts = []
             for block in text:
@@ -244,7 +274,14 @@ class LLMChain:
                 else:
                     parts.append(str(block))
             text = "\n".join(parts)
-        return str(text or "").strip()
+        text = str(text or "").strip()
+        if not text:
+            finish = choice.get("finish_reason")
+            raise RuntimeError(
+                f"empty model response (finish_reason={finish!r}; "
+                "reasoning models may need a higher token budget)"
+            )
+        return text
 
     def cloud_endpoints(self) -> list[LLMEndpoint]:
         return [e for e in self.chain if e.provider != "template"]

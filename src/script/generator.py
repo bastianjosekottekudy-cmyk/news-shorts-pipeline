@@ -702,7 +702,7 @@ def generate_script(
     config = load_pipeline_config()
     script_cfg = config.get("script", {})
     provider = str(script_cfg.get("provider", "chain")).lower()
-    yaml_model = str(script_cfg.get("model", "llama-3.1-8b-instant"))
+    yaml_model = str(script_cfg.get("model", "openai/gpt-oss-20b"))
     max_words = _max_words()
 
     used_provider = "template"
