@@ -96,3 +96,12 @@ sections:
     region: IN
     timezone: Asia/Kolkata
     youtube_tags: [shorts, india, news]
+
+  - code: gta6
+    name: GTA 6
+    search_query: "GTA 6 OR GTA VI OR \"Grand Theft Auto VI\" OR \"Grand Theft Auto 6\""
+    news_count: 5
+    language: en
+    region: US
+    timezone: Asia/Kolkata
+    youtube_tags: [shorts, gta6, gtavi, gaming, news]
