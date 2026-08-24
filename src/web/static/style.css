@@ -267,6 +267,63 @@ select {
   border-bottom: 1px solid #22304a;
 }
 
+.schedule-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+}
+
+.schedule-row-main {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.schedule-row.schedule-off strong {
+  color: #94a3b8;
+}
+
+.schedule-row input[type="time"] {
+  background: #0b1220;
+  color: #e8eef7;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 0.35rem 0.5rem;
+}
+
+.schedule-add-title {
+  margin-top: 1.25rem;
+}
+
+.add-section-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.add-section-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: #9db0c9;
+}
+
+.add-section-form input,
+.add-section-form select {
+  background: #0b1220;
+  color: #e8eef7;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font: inherit;
+}
+
+.add-section-on {
+  margin-bottom: 0.15rem;
+}
+
 .youtube-auth-panel.youtube-auth-warning {
   border-color: #a16207;
   box-shadow: inset 0 0 0 1px rgba(161, 98, 7, 0.35);

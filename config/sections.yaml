@@ -1,107 +1,150 @@
-# Add or remove sections here. Restart the app after changes.
+# Add or remove sections here, or use the dashboard Schedule panel.
 #
 # Fields:
-#   code           - short id used in output paths and API (e.g. tech)
-#   name           - Display name
-#   google_topic   - Google News topic (TECHNOLOGY, ENTERTAINMENT, WORLD, BUSINESS, NATION, …)
-#   search_query   - optional; if set, uses RSS search instead of topic
-#   rss_url        - optional; full custom RSS URL overrides topic/search
-#   news_count     - how many headlines to fetch into the section Short (default 5)
-#   language       - always English (en) for narration + Google News hl
-#   region         - Google News gl / ceid region (e.g. US, GB, IN, CY)
-#   timezone       - IANA timezone for run dates (schedule is fixed to Asia/Kolkata)
-#   youtube_tags   - tags appended on upload
+#   code              - short id used in output paths and API (e.g. tech)
+#   name              - Display name
+#   google_topic      - Google News topic (TECHNOLOGY, ENTERTAINMENT, WORLD, BUSINESS, NATION, …)
+#   search_query      - optional; if set, uses RSS search instead of topic
+#   rss_url           - optional; full custom RSS URL overrides topic/search
+#   news_count        - how many headlines to fetch into the section Short (default 5)
+#   language          - always English (en) for narration + Google News hl
+#   region            - Google News gl / ceid region (e.g. US, GB, IN, CY)
+#   timezone          - IANA timezone for run dates
+#   youtube_tags      - tags appended on upload
+#   schedule_enabled  - if false, skip the daily APScheduler job (manual Generate still works)
+#   schedule_hour     - daily hour in Asia/Kolkata (0–23, default 22 = 10:00 PM IST)
+#   schedule_minute   - daily minute (0–59, default 0)
 #
 # Always produces exactly 1 Short per section covering all fetched headlines.
-# All sections run daily at 10:00 PM India Standard Time (Asia/Kolkata).
-
 sections:
-  - code: tech
-    name: Technology
-    google_topic: TECHNOLOGY
-    news_count: 5
-    language: en
-    region: US
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, tech, news, technology]
-
-  - code: entertainment
-    name: Entertainment
-    google_topic: ENTERTAINMENT
-    news_count: 5
-    language: en
-    region: US
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, entertainment, news]
-
-  - code: global
-    name: Global News
-    google_topic: WORLD
-    news_count: 5
-    language: en
-    region: US
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, world, news, global]
-
-  - code: business
-    name: Business
-    google_topic: BUSINESS
-    news_count: 5
-    language: en
-    region: US
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, business, news]
-
-  - code: gaming
-    name: Gaming
-    search_query: "video games OR gaming OR PlayStation OR Xbox OR Nintendo OR Steam"
-    news_count: 5
-    language: en
-    region: US
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, gaming, games, news]
-
-  - code: us
-    name: US
-    google_topic: NATION
-    news_count: 5
-    language: en
-    region: US
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, us, america, news]
-
-  - code: uk
-    name: UK
-    google_topic: NATION
-    news_count: 5
-    language: en
-    region: GB
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, uk, britain, news]
-
-  - code: cyprus
-    name: Cyprus
-    search_query: "Cyprus OR Cypriot OR Nicosia OR Limassol"
-    news_count: 5
-    language: en
-    region: CY
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, cyprus, news]
-
-  - code: india
-    name: India
-    google_topic: NATION
-    news_count: 5
-    language: en
-    region: IN
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, india, news]
-
-  - code: gta6
-    name: GTA 6
-    search_query: "GTA 6 OR GTA VI OR \"Grand Theft Auto VI\" OR \"Grand Theft Auto 6\""
-    news_count: 5
-    language: en
-    region: US
-    timezone: Asia/Kolkata
-    youtube_tags: [shorts, gta6, gtavi, gaming, news]
+- code: tech
+  name: Technology
+  news_count: 5
+  language: en
+  region: US
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - tech
+  - news
+  - technology
+  schedule_enabled: true
+  schedule_hour: 22
+  schedule_minute: 0
+  google_topic: TECHNOLOGY
+- code: entertainment
+  name: Entertainment
+  news_count: 5
+  language: en
+  region: US
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - entertainment
+  - news
+  schedule_enabled: true
+  schedule_hour: 22
+  schedule_minute: 0
+  google_topic: ENTERTAINMENT
+- code: global
+  name: Global News
+  news_count: 5
+  language: en
+  region: US
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - world
+  - news
+  - global
+  schedule_enabled: true
+  schedule_hour: 22
+  schedule_minute: 0
+  google_topic: WORLD
+- code: business
+  name: Business
+  news_count: 5
+  language: en
+  region: US
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - business
+  - news
+  schedule_enabled: false
+  schedule_hour: 22
+  schedule_minute: 0
+  google_topic: BUSINESS
+- code: gaming
+  name: Gaming
+  news_count: 5
+  language: en
+  region: US
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - gaming
+  - games
+  - news
+  schedule_enabled: false
+  schedule_hour: 22
+  schedule_minute: 0
+  search_query: video games OR gaming OR PlayStation OR Xbox OR Nintendo OR Steam
+- code: us
+  name: US
+  news_count: 5
+  language: en
+  region: US
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - us
+  - america
+  - news
+  schedule_enabled: true
+  schedule_hour: 22
+  schedule_minute: 0
+  google_topic: NATION
+- code: uk
+  name: UK
+  news_count: 5
+  language: en
+  region: GB
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - uk
+  - britain
+  - news
+  schedule_enabled: true
+  schedule_hour: 22
+  schedule_minute: 0
+  google_topic: NATION
+- code: cyprus
+  name: Cyprus
+  news_count: 5
+  language: en
+  region: CY
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - cyprus
+  - news
+  schedule_enabled: true
+  schedule_hour: 22
+  schedule_minute: 0
+  search_query: Cyprus OR Cypriot OR Nicosia OR Limassol
+- code: india
+  name: India
+  news_count: 5
+  language: en
+  region: IN
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - india
+  - news
+  schedule_enabled: false
+  schedule_hour: 22
+  schedule_minute: 0
+  google_topic: NATION

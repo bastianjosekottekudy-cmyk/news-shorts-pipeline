@@ -48,8 +48,9 @@
       <p class="hint">
         Each section fetches top headlines (<code>news_count</code>, default 5)
         into one Short. Title: <code>Top Entertainment August 2, 2026</code>.
-        Scheduled daily at <strong>10:00 PM India time</strong>
-        for every section. English headlines and narration only.
+        Scheduled daily in <strong>India time</strong>
+        — enable, time, and new sections are set in the Schedule panel below.
+        English headlines and narration only.
         {% if youtube_enabled %}
         Auto-uploads to the same YouTube channel as the trends pipeline when auth is configured.
         Failed uploads are retried hourly only while any remain.
@@ -87,7 +88,7 @@
           {% endif %}
         </div>
         {% if client.can_refresh %}
-        <button type="button" class="btn btn-small" onclick="refreshYoutubeClient({{ client.id|tojson }})">Refresh</button>
+        <button type="button" class="btn btn-small" onclick='refreshYoutubeClient({{ client.id|tojson }})'>Refresh</button>
         {% endif %}
       </li>
       {% else %}
@@ -141,21 +142,84 @@
     </div>
   </section>
 
-  {% if next_runs %}
   <section class="panel schedule-panel">
-    <h2>Next scheduled</h2>
-    <p class="hint">10:00 PM India time, shown in your system clock. One row per section.</p>
-    <ul class="schedule-list">
-      {% for item in next_runs %}
-      <li>
-        <strong>{{ item.section_name }}</strong>
-        — {{ item.schedule }}
-        · next {{ item.next_run }}
+    <h2>Schedule</h2>
+    <p class="hint">Times are India Standard Time (Asia/Kolkata). Off sections skip the daily job; Generate still works. Remove drops the section from Generate/schedule only — existing library videos stay.</p>
+    <ul class="schedule-list" id="schedule-list">
+      {% for row in schedule_rows %}
+      <li class="schedule-row {% if not row.enabled %}schedule-off{% endif %}"
+          data-code="{{ row.code }}" data-name="{{ row.name }}">
+        <div class="schedule-row-main">
+          <strong>{{ row.name }}</strong>
+          <span class="meta">{{ row.code }} · next {{ row.next_run }}</span>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" class="schedule-enabled" {% if row.enabled %}checked{% endif %}>
+          <span>On</span>
+        </label>
+        <input type="time" class="schedule-time" value="{{ row.time_ist }}">
+        <button type="button" class="btn btn-danger btn-small schedule-remove">Remove</button>
       </li>
       {% endfor %}
     </ul>
+    <p id="schedule-status" class="hint"></p>
+
+    <h2 class="schedule-add-title">Add section</h2>
+    <form class="add-section-form" onsubmit="addSection(event)">
+      <label>
+        Name
+        <input type="text" id="new-section-name" required placeholder="GTA 6">
+      </label>
+      <label>
+        Code <span class="meta">(optional)</span>
+        <input type="text" id="new-section-code" placeholder="auto from name">
+      </label>
+      <label>
+        Source
+        <select id="new-section-source" onchange="toggleSectionSource()">
+          <option value="topic">Google News topic</option>
+          <option value="search">Search query</option>
+        </select>
+      </label>
+      <label id="new-section-topic-wrap">
+        Topic
+        <select id="new-section-topic">
+          {% for topic in google_news_topics %}
+          <option value="{{ topic }}" {% if topic == 'WORLD' %}selected{% endif %}>{{ topic }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label id="new-section-query-wrap" hidden>
+        Search query
+        <input type="text" id="new-section-query" placeholder='GTA 6 OR "Grand Theft Auto VI"'>
+      </label>
+      <label>
+        Region
+        <select id="new-section-region">
+          <option value="US">US</option>
+          <option value="GB">UK</option>
+          <option value="IN">India</option>
+          <option value="CY">Cyprus</option>
+          <option value="AU">Australia</option>
+          <option value="CA">Canada</option>
+        </select>
+      </label>
+      <label>
+        Headlines
+        <input type="number" id="new-section-count" min="1" max="15" value="5">
+      </label>
+      <label>
+        Daily time (IST)
+        <input type="time" id="new-section-time" value="{{ default_schedule_time }}">
+      </label>
+      <label class="toggle add-section-on">
+        <input type="checkbox" id="new-section-enabled" checked>
+        <span>Schedule on</span>
+      </label>
+      <button type="submit" class="btn">Add section</button>
+    </form>
+    <p id="add-section-status" class="hint"></p>
   </section>
-  {% endif %}
 
   <section class="library">
     {% for group in groups %}
@@ -319,6 +383,100 @@
       }
     }
 
+    async function saveSectionSchedule(code, patch) {
+      const status = document.getElementById('schedule-status');
+      const body = {};
+      if (typeof patch.enabled === 'boolean') body.enabled = patch.enabled;
+      if (patch.time) {
+        const parts = String(patch.time).split(':');
+        body.hour = parseInt(parts[0], 10);
+        body.minute = parseInt(parts[1] || '0', 10);
+      }
+      status.textContent = 'Saving ' + code + '…';
+      try {
+        const res = await fetch('/api/sections/' + encodeURIComponent(code) + '/schedule', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          status.textContent = data.detail || 'Save failed';
+          return;
+        }
+        status.textContent = code + ': saved. Reloading…';
+        setTimeout(() => location.reload(), 500);
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function removeSection(code, name) {
+      const status = document.getElementById('schedule-status');
+      const label = name || code;
+      if (!confirm('Remove "' + label + '" from Generate and the daily schedule? Existing library videos stay.')) {
+        return;
+      }
+      status.textContent = 'Removing ' + code + '…';
+      try {
+        const res = await fetch('/api/sections/' + encodeURIComponent(code), { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) {
+          status.textContent = data.detail || 'Remove failed';
+          return;
+        }
+        status.textContent = code + ': removed. Reloading…';
+        setTimeout(() => location.reload(), 500);
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    function toggleSectionSource() {
+      const mode = document.getElementById('new-section-source').value;
+      document.getElementById('new-section-topic-wrap').hidden = mode !== 'topic';
+      document.getElementById('new-section-query-wrap').hidden = mode !== 'search';
+    }
+
+    async function addSection(event) {
+      event.preventDefault();
+      const status = document.getElementById('add-section-status');
+      const time = document.getElementById('new-section-time').value || '22:00';
+      const parts = time.split(':');
+      const source = document.getElementById('new-section-source').value;
+      const payload = {
+        name: document.getElementById('new-section-name').value.trim(),
+        code: document.getElementById('new-section-code').value.trim(),
+        region: document.getElementById('new-section-region').value,
+        news_count: parseInt(document.getElementById('new-section-count').value, 10) || 5,
+        schedule_enabled: document.getElementById('new-section-enabled').checked,
+        schedule_hour: parseInt(parts[0], 10),
+        schedule_minute: parseInt(parts[1] || '0', 10),
+      };
+      if (source === 'search') {
+        payload.search_query = document.getElementById('new-section-query').value.trim();
+      } else {
+        payload.google_topic = document.getElementById('new-section-topic').value;
+      }
+      status.textContent = 'Adding…';
+      try {
+        const res = await fetch('/api/sections', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          status.textContent = data.detail || 'Add failed';
+          return;
+        }
+        status.textContent = (data.section && data.section.name) + ' added. Reloading…';
+        setTimeout(() => location.reload(), 600);
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
     async function refreshYoutubeClient(clientId) {
       const status = document.getElementById('youtube-auth-status');
       status.textContent = 'Refreshing ' + clientId + '…';
@@ -356,6 +514,27 @@
         status.textContent = 'Error: ' + e.message;
       }
     }
+
+    (function bindScheduleControls() {
+      const list = document.getElementById('schedule-list');
+      if (!list) return;
+      list.addEventListener('change', (event) => {
+        const row = event.target.closest('.schedule-row');
+        if (!row) return;
+        const code = row.dataset.code;
+        if (event.target.classList.contains('schedule-enabled')) {
+          saveSectionSchedule(code, { enabled: event.target.checked });
+        } else if (event.target.classList.contains('schedule-time')) {
+          saveSectionSchedule(code, { time: event.target.value });
+        }
+      });
+      list.addEventListener('click', (event) => {
+        const btn = event.target.closest('.schedule-remove');
+        if (!btn) return;
+        const row = btn.closest('.schedule-row');
+        if (row) removeSection(row.dataset.code, row.dataset.name);
+      });
+    })();
   </script>
 </body>
 </html>

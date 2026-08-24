@@ -17,18 +17,25 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 from src.config import (
+    DEFAULT_SCHEDULE_HOUR,
+    DEFAULT_SCHEDULE_MINUTE,
+    GOOGLE_NEWS_TOPICS,
     OUTPUT_DIR,
+    add_section,
     get_section,
     load_pipeline_config,
     load_sections,
     local_run_date,
+    remove_section,
+    update_section_schedule,
 )
 from src.db import store
 from src.naming import title_from_video_path
 from src.pipeline import run_section_batch
-from src.scheduler import get_next_run_times
+from src.scheduler import get_next_run_times, reload_section_jobs
 from src.youtube.auth import (
     authorize_client_interactive,
     probe_youtube_clients,
@@ -36,6 +43,25 @@ from src.youtube.auth import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SectionScheduleIn(BaseModel):
+    enabled: bool | None = None
+    hour: int | None = Field(default=None, ge=0, le=23)
+    minute: int | None = Field(default=None, ge=0, le=59)
+
+
+class NewSectionIn(BaseModel):
+    name: str
+    code: str = ""
+    google_topic: str = ""
+    search_query: str = ""
+    rss_url: str = ""
+    region: str = "US"
+    news_count: int = Field(default=5, ge=1, le=15)
+    schedule_enabled: bool = True
+    schedule_hour: int = Field(default=DEFAULT_SCHEDULE_HOUR, ge=0, le=23)
+    schedule_minute: int = Field(default=DEFAULT_SCHEDULE_MINUTE, ge=0, le=59)
 
 WEB_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
@@ -374,6 +400,18 @@ async def index(
     sections = load_sections()
     available_dates = store.list_run_dates()
     next_runs = get_next_run_times()
+    next_map = {str(item.get("section_code")): item for item in next_runs}
+    schedule_rows = [
+        {
+            "code": s.code,
+            "name": s.name,
+            "enabled": s.schedule_enabled,
+            "time_ist": s.schedule_time_ist,
+            "next_run": (next_map.get(s.code) or {}).get("next_run") or "—",
+            "schedule": (next_map.get(s.code) or {}).get("schedule") or "",
+        }
+        for s in sections
+    ]
     has_running = any(r["status"] == "running" for r in runs) or stats.get("running", 0) > 0
     has_uploading = (
         any(r.get("upload_status") == "uploading" for r in runs)
@@ -396,6 +434,7 @@ async def index(
             "sections": sections,
             "available_dates": available_dates,
             "next_runs": next_runs,
+            "schedule_rows": schedule_rows,
             "filter_section": (section or "").lower(),
             "filter_date": date or "",
             "has_running": has_running,
@@ -406,6 +445,8 @@ async def index(
                 c.get("status") != "ok" for c in youtube_clients
             ),
             "youtube_flash": youtube_flash or "",
+            "google_news_topics": GOOGLE_NEWS_TOPICS,
+            "default_schedule_time": f"{DEFAULT_SCHEDULE_HOUR:02d}:{DEFAULT_SCHEDULE_MINUTE:02d}",
         },
     )
 
@@ -645,10 +686,92 @@ async def api_sections() -> JSONResponse:
             "name": s.name,
             "news_count": s.news_count,
             "timezone": s.timezone,
+            "schedule_enabled": s.schedule_enabled,
+            "schedule_hour": s.schedule_hour,
+            "schedule_minute": s.schedule_minute,
+            "schedule_time_ist": s.schedule_time_ist,
+            "google_topic": s.google_topic,
+            "search_query": s.search_query,
+            "region": s.region,
         }
         for s in load_sections()
     ]
     return JSONResponse({"sections": sections, "next_runs": get_next_run_times()})
+
+
+@app.patch("/api/sections/{section_code}/schedule")
+async def api_section_schedule(section_code: str, body: SectionScheduleIn) -> JSONResponse:
+    if body.enabled is None and body.hour is None and body.minute is None:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    try:
+        section = update_section_schedule(
+            section_code,
+            enabled=body.enabled,
+            hour=body.hour,
+            minute=body.minute,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    reload_section_jobs()
+    return JSONResponse(
+        {
+            "ok": True,
+            "section": section.code,
+            "schedule_enabled": section.schedule_enabled,
+            "schedule_time_ist": section.schedule_time_ist,
+            "next_runs": get_next_run_times(),
+        }
+    )
+
+
+@app.post("/api/sections")
+async def api_add_section(body: NewSectionIn) -> JSONResponse:
+    try:
+        section = add_section(
+            name=body.name,
+            code=body.code,
+            google_topic=body.google_topic,
+            search_query=body.search_query,
+            rss_url=body.rss_url,
+            region=body.region,
+            news_count=body.news_count,
+            schedule_enabled=body.schedule_enabled,
+            schedule_hour=body.schedule_hour,
+            schedule_minute=body.schedule_minute,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reload_section_jobs()
+    return JSONResponse(
+        {
+            "ok": True,
+            "section": {
+                "code": section.code,
+                "name": section.name,
+                "news_count": section.news_count,
+                "schedule_enabled": section.schedule_enabled,
+                "schedule_time_ist": section.schedule_time_ist,
+            },
+        }
+    )
+
+
+@app.delete("/api/sections/{section_code}")
+async def api_remove_section(section_code: str) -> JSONResponse:
+    code = section_code.lower()
+    with _running_lock:
+        if code in _running_sections:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{code} is generating — wait until it finishes",
+            )
+    try:
+        removed = remove_section(code)
+    except ValueError as exc:
+        status = 404 if "Unknown" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    reload_section_jobs()
+    return JSONResponse({"ok": True, "removed": removed})
 
 
 @app.get("/api/runs")

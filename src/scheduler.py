@@ -1,4 +1,4 @@
-"""APScheduler: section batches (IST) + conditional failed-upload retries."""
+"""APScheduler: per-section IST jobs + conditional failed-upload retries."""
 
 from __future__ import annotations
 
@@ -11,20 +11,22 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from src.config import load_sections
+from src.config import (
+    DEFAULT_SCHEDULE_HOUR,
+    DEFAULT_SCHEDULE_MINUTE,
+    SCHEDULE_TIMEZONE,
+    Section,
+    load_sections,
+)
 
 logger = logging.getLogger(__name__)
 
-# All sections share India Standard Time schedule (evening only).
-SCHEDULE_TIMEZONE = "Asia/Kolkata"
-SCHEDULE_HOURS = (22,)  # 10:00 PM IST
 UPLOAD_RETRY_JOB_ID = "retry-failed-uploads"
 UPLOAD_RETRY_INTERVAL_HOURS = 1
 
-_HOUR_LABELS = {22: "10:00 PM"}
-
 _scheduler: BackgroundScheduler | None = None
 _retry_uploads_callback: Callable[[], None] | None = None
+_run_callback: Callable[[str], None] | None = None
 
 
 def _format_local(dt: datetime) -> str:
@@ -40,6 +42,16 @@ def _format_local_clock(hour: int, minute: int = 0) -> str:
     ist_dt = now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
     local = ist_dt.astimezone()
     return local.strftime("%I:%M %p").lstrip("0")
+
+
+def _job_id(section_code: str) -> str:
+    return f"daily-{section_code}"
+
+
+def _ist_label(hour: int, minute: int = 0) -> str:
+    suffix = "AM" if hour < 12 else "PM"
+    display = hour % 12 or 12
+    return f"{display}:{minute:02d} {suffix} IST"
 
 
 def sync_failed_upload_retry_job(*, run_in_hours: float | None = None) -> None:
@@ -82,80 +94,109 @@ def sync_failed_upload_retry_job(*, run_in_hours: float | None = None) -> None:
         )
 
 
+def _clear_section_jobs(scheduler: BackgroundScheduler) -> None:
+    for job in list(scheduler.get_jobs()):
+        if str(job.id).startswith("daily-"):
+            scheduler.remove_job(job.id)
+
+
+def _schedule_section(scheduler: BackgroundScheduler, section: Section, run_callback: Callable[[str], None]) -> None:
+    hour = section.schedule_hour if section.schedule_hour is not None else DEFAULT_SCHEDULE_HOUR
+    minute = (
+        section.schedule_minute
+        if section.schedule_minute is not None
+        else DEFAULT_SCHEDULE_MINUTE
+    )
+    scheduler.add_job(
+        run_callback,
+        trigger=CronTrigger(
+            hour=hour,
+            minute=minute,
+            timezone=SCHEDULE_TIMEZONE,
+        ),
+        args=[section.code],
+        id=_job_id(section.code),
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info(
+        "Scheduled %s job for %s (%s)",
+        _ist_label(hour, minute),
+        section.code,
+        section.name,
+    )
+
+
+def reload_section_jobs() -> None:
+    """Rebuild daily section jobs from current sections.yaml."""
+    if not _scheduler or not _scheduler.running or _run_callback is None:
+        return
+    _clear_section_jobs(_scheduler)
+    for section in load_sections():
+        if not section.schedule_enabled:
+            logger.info("Schedule off for %s (%s)", section.code, section.name)
+            continue
+        _schedule_section(_scheduler, section, _run_callback)
+
+
 def start_scheduler(
     run_callback: Callable[[str], None],
     *,
     retry_uploads_callback: Callable[[], None] | None = None,
 ) -> BackgroundScheduler:
-    """Section jobs at 10:00 PM IST; upload retries only while failures exist."""
-    global _scheduler, _retry_uploads_callback
+    """Per-section IST jobs; upload retries only while failures exist."""
+    global _scheduler, _retry_uploads_callback, _run_callback
     if _scheduler and _scheduler.running:
         return _scheduler
 
     scheduler = BackgroundScheduler()
+    _run_callback = run_callback
     for section in load_sections():
-        for hour in SCHEDULE_HOURS:
-            period = f"{hour:02d}00"
-            job_id = f"daily-{section.code}-{period}"
-            label = _HOUR_LABELS.get(hour, f"{hour:02d}:00")
-            scheduler.add_job(
-                run_callback,
-                trigger=CronTrigger(
-                    hour=hour, minute=0, timezone=SCHEDULE_TIMEZONE
-                ),
-                args=[section.code],
-                id=job_id,
-                replace_existing=True,
-                misfire_grace_time=3600,
-            )
-            logger.info(
-                "Scheduled %s IST job for %s (%s)",
-                label,
-                section.code,
-                section.name,
-            )
+        if not section.schedule_enabled:
+            logger.info("Schedule off for %s (%s)", section.code, section.name)
+            continue
+        _schedule_section(scheduler, section, run_callback)
 
     _retry_uploads_callback = retry_uploads_callback
     scheduler.start()
     _scheduler = scheduler
 
-    # Only arm retry if there are already failed uploads (e.g. after restart).
     if retry_uploads_callback is not None:
         sync_failed_upload_retry_job()
 
     return scheduler
 
 
-def get_next_run_times() -> list[dict[str, str]]:
-    """One row per section: daily local clocks + next run in system time."""
-    if not _scheduler:
-        return []
+def get_next_run_times() -> list[dict[str, str | bool]]:
+    """One row per section, including disabled schedules."""
+    sections = load_sections()
+    next_by_code: dict[str, datetime | None] = {}
+    if _scheduler:
+        for job in _scheduler.get_jobs():
+            if not str(job.id).startswith("daily-"):
+                continue
+            code = str(job.id)[len("daily-") :]
+            next_by_code[code] = job.next_run_time
 
-    section_names = {s.code: s.name for s in load_sections()}
-    by_section: dict[str, datetime | None] = {}
-
-    for job in _scheduler.get_jobs():
-        if not str(job.id).startswith("daily-"):
-            continue
-        parts = job.id.split("-")
-        section_code = parts[1] if len(parts) >= 2 else job.id
-        next_run = job.next_run_time
-        if next_run is None:
-            continue
-        current = by_section.get(section_code)
-        if current is None or next_run < current:
-            by_section[section_code] = next_run
-
-    clocks = " & ".join(_format_local_clock(h) for h in SCHEDULE_HOURS)
-    schedule_label = f"daily {clocks} (system)"
-
-    result: list[dict[str, str]] = []
-    for section_code, next_run in by_section.items():
+    result: list[dict[str, str | bool]] = []
+    for section in sections:
+        hour = section.schedule_hour
+        minute = section.schedule_minute
+        local_clock = _format_local_clock(hour, minute)
+        next_run = next_by_code.get(section.code)
+        if section.schedule_enabled:
+            schedule = f"daily {_ist_label(hour, minute)} · {local_clock} (system)"
+        else:
+            schedule = f"off · {_ist_label(hour, minute)}"
         result.append(
             {
-                "section_code": section_code,
-                "section_name": section_names.get(section_code, section_code),
-                "schedule": schedule_label,
+                "section_code": section.code,
+                "section_name": section.name,
+                "schedule": schedule,
+                "enabled": section.schedule_enabled,
+                "hour": hour,
+                "minute": minute,
+                "time_ist": f"{hour:02d}:{minute:02d}",
                 "next_run": _format_local(next_run) if next_run else "",
                 "next_run_iso": next_run.isoformat() if next_run else "",
             }
@@ -163,7 +204,8 @@ def get_next_run_times() -> list[dict[str, str]]:
 
     result.sort(
         key=lambda item: (
-            item.get("next_run_iso") or "",
+            not bool(item.get("enabled")),
+            item.get("next_run_iso") or "z",
             item.get("section_code") or "",
         )
     )
@@ -171,8 +213,9 @@ def get_next_run_times() -> list[dict[str, str]]:
 
 
 def shutdown_scheduler() -> None:
-    global _scheduler, _retry_uploads_callback
+    global _scheduler, _retry_uploads_callback, _run_callback
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
     _scheduler = None
     _retry_uploads_callback = None
+    _run_callback = None
