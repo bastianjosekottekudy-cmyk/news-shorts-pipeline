@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+# Ensure moviepy / imageio-ffmpeg uses system ffmpeg (supporting NVENC / hardware acceleration)
+_system_ffmpeg = shutil.which("ffmpeg")
+if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
+    os.environ["IMAGEIO_FFMPEG_EXE"] = _system_ffmpeg
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
@@ -188,7 +194,12 @@ def _make_image_slide(
 
 
 def _nvenc_available() -> bool:
-    ffmpeg = shutil.which("ffmpeg")
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return False
     try:

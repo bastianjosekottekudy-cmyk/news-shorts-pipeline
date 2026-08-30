@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,11 +14,15 @@ from typing import Any, Iterator
 from src.config import PROJECT_ROOT, get_env
 
 DB_PATH = Path(get_env("DB_PATH", str(PROJECT_ROOT / "runs.db")))
+_db_lock = threading.RLock()
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=60.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 60000;")
     return conn
 
 
@@ -78,12 +84,35 @@ def init_db() -> None:
 
 @contextmanager
 def db() -> Iterator[sqlite3.Connection]:
-    conn = _connect()
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+    with _db_lock:
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            conn = None
+            try:
+                conn = _connect()
+                yield conn
+                conn.commit()
+                break
+            except sqlite3.OperationalError as exc:
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                if "locked" in str(exc).lower() and attempt < max_attempts:
+                    time.sleep(0.15 * attempt)
+                    continue
+                raise
+            except Exception:
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                raise
+            finally:
+                if conn is not None:
+                    conn.close()
 
 
 def next_batch_id() -> int:
@@ -136,6 +165,8 @@ def update_run(run_id: int, **fields: Any) -> None:
 def append_step_log(run_id: int, step: str, detail: str = "") -> None:
     with db() as conn:
         row = conn.execute("SELECT steps_log FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if not row:
+            return
         log: list[dict[str, str]] = json.loads(row["steps_log"] or "[]")
         log.append(
             {

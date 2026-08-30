@@ -9,6 +9,7 @@ build/
 
 # Secrets and local data
 .env
+secrets
 secrets/
 output/
 runs.db

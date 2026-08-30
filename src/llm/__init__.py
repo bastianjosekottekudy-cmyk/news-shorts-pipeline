@@ -1,4 +1,4 @@
-"""LLM helpers for narration."""
+"""LLM helpers (installed by llm-chain skill)."""
 
 from src.llm.chain import (
     DEFAULT_LLM_CHAIN,

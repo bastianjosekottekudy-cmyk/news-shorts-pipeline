@@ -73,6 +73,7 @@ _running_lock = threading.Lock()
 _running_sections: set[str] = set()
 _upload_lock = threading.Lock()
 _uploading_runs: set[int] = set()
+_generate_semaphore = threading.Semaphore(4)
 
 
 def _youtube_enabled() -> bool:
@@ -309,24 +310,25 @@ def _group_by_date(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _scheduled_run(section_code: str) -> None:
     code = section_code.lower()
-    with _running_lock:
-        if code in _running_sections:
-            logger.warning(
-                "Skipping scheduled run for %s — already running",
-                code,
-            )
-            return
-        _running_sections.add(code)
-    try:
-        run_section_batch(
-            code,
-            skip_upload=not _youtube_enabled(),
-        )
-    except Exception:
-        logger.exception("Scheduled run failed for %s", code)
-    finally:
+    with _generate_semaphore:
         with _running_lock:
-            _running_sections.discard(code)
+            if code in _running_sections:
+                logger.warning(
+                    "Skipping scheduled run for %s — already running",
+                    code,
+                )
+                return
+            _running_sections.add(code)
+        try:
+            run_section_batch(
+                code,
+                skip_upload=not _youtube_enabled(),
+            )
+        except Exception:
+            logger.exception("Scheduled run failed for %s", code)
+        finally:
+            with _running_lock:
+                _running_sections.discard(code)
 
 
 def _retry_failed_uploads() -> None:
@@ -806,19 +808,20 @@ async def api_trigger(
     if async_run:
 
         def _bg() -> None:
-            with _running_lock:
-                _running_sections.add(code)
-            try:
-                run_section_batch(
-                    code,
-                    news_provider="mock" if mock else "google_news_rss",
-                    skip_upload=not _youtube_enabled(),
-                )
-            except Exception:
-                logger.exception("Background batch failed for %s", code)
-            finally:
+            with _generate_semaphore:
                 with _running_lock:
-                    _running_sections.discard(code)
+                    _running_sections.add(code)
+                try:
+                    run_section_batch(
+                        code,
+                        news_provider="mock" if mock else "google_news_rss",
+                        skip_upload=not _youtube_enabled(),
+                    )
+                except Exception:
+                    logger.exception("Background batch failed for %s", code)
+                finally:
+                    with _running_lock:
+                        _running_sections.discard(code)
 
         background_tasks.add_task(_bg)
         return JSONResponse(
@@ -829,17 +832,18 @@ async def api_trigger(
             }
         )
 
-    with _running_lock:
-        _running_sections.add(code)
-    try:
-        run_ids = run_section_batch(
-            code,
-            news_provider="mock" if mock else "google_news_rss",
-            skip_upload=not _youtube_enabled(),
-        )
-    finally:
+    with _generate_semaphore:
         with _running_lock:
-            _running_sections.discard(code)
+            _running_sections.add(code)
+        try:
+            run_ids = run_section_batch(
+                code,
+                news_provider="mock" if mock else "google_news_rss",
+                skip_upload=not _youtube_enabled(),
+            )
+        finally:
+            with _running_lock:
+                _running_sections.discard(code)
     return JSONResponse(
         {"run_ids": run_ids, "status": "completed", "section": code}
     )
@@ -855,22 +859,23 @@ async def api_trigger_all(
     def _bg() -> None:
         for section in sections:
             code = section.code
-            with _running_lock:
-                if code in _running_sections:
-                    logger.warning("Skip %s — already running", code)
-                    continue
-                _running_sections.add(code)
-            try:
-                run_section_batch(
-                    code,
-                    news_provider="mock" if mock else "google_news_rss",
-                    skip_upload=not _youtube_enabled(),
-                )
-            except Exception:
-                logger.exception("Background batch failed for %s", code)
-            finally:
+            with _generate_semaphore:
                 with _running_lock:
-                    _running_sections.discard(code)
+                    if code in _running_sections:
+                        logger.warning("Skip %s — already running", code)
+                        continue
+                    _running_sections.add(code)
+                try:
+                    run_section_batch(
+                        code,
+                        news_provider="mock" if mock else "google_news_rss",
+                        skip_upload=not _youtube_enabled(),
+                    )
+                except Exception:
+                    logger.exception("Background batch failed for %s", code)
+                finally:
+                    with _running_lock:
+                        _running_sections.discard(code)
 
     background_tasks.add_task(_bg)
     return JSONResponse(
