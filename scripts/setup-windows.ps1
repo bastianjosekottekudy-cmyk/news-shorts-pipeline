@@ -51,12 +51,12 @@ if (-not (Test-Path ".env")) {
     Write-Host "Created .env from .env.example - fill in YouTube credentials if needed." -ForegroundColor Yellow
 }
 
-$commEnv = Join-Path (Resolve-Path ..).Path "comm-assistant\.env"
-if (Test-Path $commEnv) {
-    Write-Host "Syncing LLM env keys from ../comm-assistant/.env ..."
-    & .\.venv\Scripts\python.exe .\scripts\sync_llm_env_from_comm_assistant.py
+$centralSync = Join-Path $env:USERPROFILE ".cursor\skills\llm-chain\scripts\sync_env.py"
+if (Test-Path $centralSync) {
+    Write-Host "Syncing LLM keys from central store (~/.cursor/llm-keys.env)..."
+    & .\.venv\Scripts\python.exe $centralSync --project .
 } else {
-    Write-Host "No ../comm-assistant/.env found — set GROQ_API_KEY / LLM_* in .env manually." -ForegroundColor Yellow
+    Write-Host "Set GROQ_API_KEY / LLM_* in .env manually or via llm-chain skill." -ForegroundColor Yellow
 }
 
 New-Item -ItemType Directory -Force -Path output | Out-Null
