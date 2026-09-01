@@ -53,7 +53,7 @@
         English headlines and narration only.
         {% if youtube_enabled %}
         Auto-uploads to the same YouTube channel as the trends pipeline when auth is configured.
-        Failed uploads are retried hourly only while any remain.
+        Failed uploads are retried every 6 hours (up to 10 per schedule) only while any remain.
         {% endif %}
       </p>
     </div>

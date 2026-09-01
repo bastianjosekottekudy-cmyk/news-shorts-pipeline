@@ -1,83 +1,79 @@
 # News Shorts Pipeline
 
-Daily news → **vertical YouTube Shorts** (one Short per headline), with a local library dashboard.
+Daily news → **vertical YouTube Shorts** (9:16) with deep, calm, synchronized narration and a local dashboard.
 
-Default sections: **Technology**, **Entertainment**, **Global News**, **Business**. Each run fetches **5 headlines** (`news_count`) into **one Short**. Scheduled at **10:00 PM local** per section timezone. Uses the same **Groq** narration API and **YouTube OAuth secrets** as [trends-video-pipeline](../trends-video-pipeline).
+Default sections: **Technology**, **Entertainment**, **Global News**, **Business**. Each run fetches **5 headlines** (`news_count`) into **one Short**.
 
-## Features
+---
 
-- Config-driven sections (`config/sections.yaml`) — add topics anytime
-- Per-section `news_count` (default 5) → one Short covering those stories
-- Google News topic RSS + related images (article og:image, Wikimedia, Openverse)
-- Punchy narration via **Groq** (template fallback without a key)
-- edge-tts + MoviePy 9:16 render (NVIDIA NVENC when available)
-- Dashboard at `http://127.0.0.1:8081`
-- YouTube upload to the **same channel** as the trends pipeline
+## 🎙️ Narration & Synchronization
 
-## Prerequisites (Windows)
+* **Primary TTS**: **Google Cloud Text-to-Speech (Chirp 3 HD)**
+  * Voice: `en-US-Chirp3-HD-Fenrir` (Deep, calm, cinematic male voice).
+  * High fidelity studio-quality speech with natural pacing.
+* **Backup TTS**: **Microsoft Edge-TTS**
+  * Voice: `en-US-ChristopherNeural` (Pitch: `-8Hz`, Rate: `-4%`).
+  * Automatic zero-cost fallback if GCP credentials/quota are unavailable.
+* **Synchronization**: Frame-accurate visual duration matching via `narration_segments.json`.
 
-1. **Python 3.11+**
-2. **FFmpeg**
-3. **Groq API key** (optional) — [console.groq.com](https://console.groq.com/)
-4. YouTube secrets from trends (see below)
+---
 
-## Quick Start
+## 📦 Installation & Setup
 
-```powershell
-cd C:\Users\USER\Projects\news-shorts-pipeline
-.\scripts\setup-windows.ps1
+### 1. Prerequisites
+* **Python 3.11+**
+* **FFmpeg & ffprobe** (`sudo pacman -S ffmpeg` or `sudo apt install ffmpeg`)
+
+### 2. Environment Setup
+
+```bash
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-Copy `.env` keys from trends (at least `GROQ_API_KEY`). YouTube OAuth clients are backed up by the personal **google-auth** skill:
+### 3. Configure API Keys
 
-```powershell
-python "$env:USERPROFILE\.cursor\skills\google-auth\scripts\bootstrap.py" --from . --service youtube
-python "$env:USERPROFILE\.cursor\skills\google-auth\scripts\sync.py" --project . --service youtube --write-yaml
-python "$env:USERPROFILE\.cursor\skills\google-auth\scripts\status.py" --project . --service youtube
+Copy `.env.example` to `.env`:
+```bash
+cp .env.example .env
 ```
 
-Upload failover: `youtube.clients` in `config/pipeline.yaml` tries OAuth clients in order when quota/auth fails. Authorize each once:
-
-```powershell
-.\.venv\Scripts\python.exe -m src.youtube.auth --client primary
-.\.venv\Scripts\python.exe -m src.youtube.auth --client backup1
+Ensure your `GOOGLE_API_KEY` is present in `.env`:
+```ini
+GOOGLE_API_KEY=AIzaSyAbVP...
+GROQ_API_KEY=gsk_...
 ```
 
-Add another later: put `secrets/clients/backup2/client_secrets.json`, append a yaml entry, then `auth --client backup2`.
+---
 
-Then:
+## 🚀 Running the Pipeline
 
-```powershell
-.\scripts\run.ps1
+### Start Web Dashboard
+```bash
+# Run server at http://127.0.0.1:8081
+python3 -m src.main
 ```
 
-Open **http://127.0.0.1:8081**.
+### Manual Trigger CLI
+```bash
+# Generate single section (e.g. Technology)
+python3 -m src.pipeline --section tech
 
-## Manual run
+# Generate all sections
+python3 -m src.pipeline --all
 
-```powershell
-.\.venv\Scripts\python.exe -m src.pipeline --section tech --mock
-.\.venv\Scripts\python.exe -m src.pipeline --section tech --count 3
-.\.venv\Scripts\python.exe -m src.pipeline --all
+# Test run with mock assets
+python3 -m src.pipeline --section tech --mock
 ```
 
-## Adding sections
+---
 
-Edit `config/sections.yaml` and restart. Set `google_topic`, `search_query`, or `rss_url`, plus `count`.
+## ⚙️ Configuration Files
 
-## Configuration
-
-- `config/sections.yaml` — sections, counts, timezones
-- `config/pipeline.yaml` — 1080×1920, duration, Groq, images, YouTube
-- `.env` — `GROQ_API_KEY`, YouTube token (same as trends)
-
-## Dashboard
-
-| URL | Description |
-|-----|-------------|
-| `/` | Library by date + section filters |
-| `/runs/{id}` | Detail: player, news, script |
-| `POST /api/trigger/{code}` | Generate section batch |
-| `POST /api/trigger-all` | Generate all sections |
-| `POST /api/runs/{id}/upload` | Upload Short to YouTube |
-| `DELETE /api/runs/{id}` | Delete run + files |
+* **`config/sections.yaml`**: Configures news sections, regions, headline counts, and schedules.
+* **`config/pipeline.yaml`**: Video dimensions (1080x1920), TTS voice presets, and YouTube upload settings.
+* **`.env`**: API keys for Google Cloud TTS, LLMs, and YouTube tokens.

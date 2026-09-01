@@ -1,57 +1,50 @@
 max_images_per_short: 4
-max_video_duration_sec: 90   # allow clearer multi-story narration
+max_video_duration_sec: 90
 target_duration_sec: 70
-
 web:
   host: 127.0.0.1
   port: 8081
-
 video:
   width: 1080
   height: 1920
   target_duration_sec: 70
   fps: 24
   format: mp4
-  # auto = use NVIDIA NVENC when available, else libx264
   codec: auto
-
 tts:
-  provider: edge-tts
-  rate: "-8%"
-  segment_pause_sec: 0.4
-  voice_map:
-    en: en-US-JennyNeural
-
+  provider: chirp3
+  gcp_voice: en-US-Chirp3-HD-Fenrir
+  backup_voice: en-US-ChristopherNeural
+  backup_pitch: -8Hz
+  backup_rate: -4%
+  segment_pause_sec: 0.35
 script:
-  provider: chain   # chain | groq (alias) | template
-  # Model order comes from env LLM_CHAIN (quality-first). This field is unused when LLM_CHAIN is set.
+  provider: chain
   model: gemini-3.5-flash
-  style: natural human news Shorts host speaking in complete sentences; explain each story clearly; do not re-read on-screen headlines; never name outlets or say website domains/.com
-  intro_template: "Here are today's top {n} {section} stories."
-  outro_template: "Thanks for watching. Follow for more English news Shorts."
-
+  style: natural human news Shorts host speaking in complete sentences; explain each
+    story clearly; do not re-read on-screen headlines; never name outlets or say website
+    domains/.com
+  intro_template: Here are today's top {n} {section} stories.
+  outro_template: Thanks for watching. Follow for more English news Shorts.
 images:
-  providers: [news_og, wikimedia, openverse]
+  providers:
+  - news_og
+  - wikimedia
+  - openverse
   llm_keywords: true
   max_queries_per_story: 3
-
-# Same YouTube channel as trends-video-pipeline — use shared secrets/
-# Upload tries clients in order (quota/auth fail → next). Auth each once:
-#   python -m src.youtube.auth --client primary
-#   python -m src.youtube.auth --client backup1
-#   python -m src.youtube.auth --client backup2
 youtube:
   enabled: true
-  category_id: "25"
+  category_id: '25'
   privacy: public
   made_for_kids: false
   clients:
-    - id: primary
-      client_secrets: secrets/client_secrets.json
-      token: secrets/token.json
-    - id: backup1
-      client_secrets: secrets/clients/backup1/client_secrets.json
-      token: secrets/clients/backup1/token.json
-    - id: backup2
-      client_secrets: secrets/clients/backup2/client_secrets.json
-      token: secrets/clients/backup2/token.json
+  - id: primary
+    client_secrets: secrets/client_secrets.json
+    token: secrets/token.json
+  - id: backup1
+    client_secrets: secrets/clients/backup1/client_secrets.json
+    token: secrets/clients/backup1/token.json
+  - id: backup2
+    client_secrets: secrets/clients/backup2/client_secrets.json
+    token: secrets/clients/backup2/token.json
