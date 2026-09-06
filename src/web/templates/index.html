@@ -88,7 +88,7 @@
           {% endif %}
         </div>
         {% if client.can_refresh %}
-        <button type="button" class="btn btn-small" onclick='refreshYoutubeClient({{ client.id|tojson }})'>Refresh</button>
+        <button type="button" class="btn btn-small" onclick='refreshYoutubeClient({{ client.id|tojson }})'>{{ client.action_label or ('Refresh' if client.status == 'ok' else 'Authorize') }}</button>
         {% endif %}
       </li>
       {% else %}
@@ -477,39 +477,85 @@
       }
     }
 
+    let _authPollTimer = null;
+
     async function refreshYoutubeClient(clientId) {
       const status = document.getElementById('youtube-auth-status');
-      status.textContent = 'Refreshing ' + clientId + '…';
+      if (_authPollTimer) {
+        clearInterval(_authPollTimer);
+        _authPollTimer = null;
+      }
+      status.innerHTML = 'Connecting to ' + clientId + '…';
+
       try {
         const res = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/refresh', {
           method: 'POST',
         });
         const data = await res.json();
         if (!res.ok) {
-          status.textContent = data.detail || 'Refresh failed';
+          status.textContent = data.detail || 'Request failed';
           return;
         }
+
+        // If silent refresh succeeded (token was already valid or refreshed in place):
         if (data.ok) {
-          status.textContent = clientId + ': ' + (data.detail || 'ok') + ' — reloading…';
-          setTimeout(() => location.reload(), 600);
+          status.textContent = clientId + ': ' + (data.detail || 'Token refreshed') + ' — reloading…';
+          setTimeout(() => location.reload(), 800);
           return;
         }
-        if (data.needs_browser) {
-          status.textContent = clientId + ': complete Google sign-in in the browser window that opens…';
-          const authRes = await fetch(
-            '/api/youtube/clients/' + encodeURIComponent(clientId) + '/authorize',
-            { method: 'POST' }
-          );
-          const authData = await authRes.json().catch(() => ({}));
-          if (!authRes.ok || !authData.ok) {
-            status.textContent = authData.detail || 'Authorization failed';
-            return;
-          }
-          status.textContent = clientId + ': authorized — reloading…';
-          setTimeout(() => location.reload(), 600);
+
+        // If interactive browser sign-in is required:
+        let authUrl = data.auth_url;
+        if (!authUrl && data.needs_browser) {
+          const startRes = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/start-auth', {
+            method: 'POST',
+          });
+          const startData = await startRes.json();
+          authUrl = startData.auth_url;
+        }
+
+        if (authUrl) {
+          // Open the sign-in URL in a new tab
+          window.open(authUrl, '_blank');
+
+          status.innerHTML =
+            '<strong>Google Sign-in Required:</strong> Please complete sign-in in the opened tab.<br>' +
+            '<a href="' + authUrl + '" target="_blank" class="btn btn-small" style="margin: 8px 0; display: inline-block;">' +
+            '👉 Click here if window did not open</a><br>' +
+            '<span style="opacity:0.8;">Waiting for authorization to complete…</span>';
+
+          // Poll for completion
+          const startTime = Date.now();
+          _authPollTimer = setInterval(async () => {
+            if (Date.now() - startTime > 180000) {
+              clearInterval(_authPollTimer);
+              _authPollTimer = null;
+              status.textContent = clientId + ': Authorization timed out. Please try again.';
+              return;
+            }
+
+            try {
+              const pollRes = await fetch('/api/youtube/clients/' + encodeURIComponent(clientId) + '/auth-status');
+              if (!pollRes.ok) return;
+              const pollData = await pollRes.json();
+              if (pollData.status === 'completed' || pollData.ok) {
+                clearInterval(_authPollTimer);
+                _authPollTimer = null;
+                status.innerHTML = '<strong style="color:var(--color-success, #22c55e);">✓ ' + clientId + ': Authorized successfully!</strong> Reloading…';
+                setTimeout(() => location.reload(), 800);
+              } else if (pollData.status === 'error') {
+                clearInterval(_authPollTimer);
+                _authPollTimer = null;
+                status.textContent = clientId + ': ' + (pollData.detail || 'Authorization failed');
+              }
+            } catch (err) {
+              // ignore transient fetch error while polling
+            }
+          }, 1500);
           return;
         }
-        status.textContent = data.detail || 'Refresh failed';
+
+        status.textContent = data.detail || 'Action failed';
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
       }

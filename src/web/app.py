@@ -38,7 +38,9 @@ from src.pipeline import run_section_batch
 from src.scheduler import get_next_run_times, reload_section_jobs
 from src.youtube.auth import (
     authorize_client_interactive,
+    get_auth_session_status,
     probe_youtube_clients,
+    start_auth_session,
     try_silent_refresh,
 )
 
@@ -496,55 +498,66 @@ async def youtube_client_refresh(client_id: str) -> JSONResponse:
     return JSONResponse(result)
 
 
-@app.post("/api/youtube/clients/{client_id}/authorize")
-async def youtube_client_authorize(client_id: str) -> JSONResponse:
-    """Desktop loopback Google login (blocks until the user finishes sign-in)."""
+@app.get("/api/youtube/clients/{client_id}/auth-status")
+async def youtube_client_auth_status(client_id: str) -> JSONResponse:
+    """Check status of an active or recent interactive OAuth session."""
     if not _youtube_enabled():
         raise HTTPException(status_code=400, detail="YouTube upload is disabled")
     try:
-        result = await asyncio.to_thread(authorize_client_interactive, client_id)
+        return JSONResponse(get_auth_session_status(client_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/youtube/clients/{client_id}/start-auth")
+async def youtube_client_start_auth(client_id: str) -> JSONResponse:
+    """Start loopback listener with timeout and return auth_url for browser."""
+    if not _youtube_enabled():
+        raise HTTPException(status_code=400, detail="YouTube upload is disabled")
+    try:
+        return JSONResponse(start_auth_session(client_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("YouTube authorize failed for %s: %s", client_id, exc)
+
+
+@app.post("/api/youtube/clients/{client_id}/authorize")
+async def youtube_client_authorize(client_id: str) -> JSONResponse:
+    """Start interactive OAuth session and return auth_url."""
+    if not _youtube_enabled():
+        raise HTTPException(status_code=400, detail="YouTube upload is disabled")
+    try:
+        session_info = start_auth_session(client_id)
         return JSONResponse(
             {
-                "ok": False,
-                "id": client_id,
-                "status": "error",
-                "detail": str(exc)[:240],
-                "needs_browser": False,
-            },
-            status_code=500,
+                "ok": True,
+                "needs_browser": True,
+                "auth_url": session_info.get("auth_url", ""),
+                "status": session_info.get("status", "pending"),
+                "detail": session_info.get("detail", "Sign in with Google in browser"),
+            }
         )
-    return JSONResponse(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/youtube/clients/{client_id}/authorize")
 async def youtube_client_authorize_redirect(client_id: str) -> RedirectResponse:
-    """Same as POST authorize, then redirect back to the dashboard with a flash."""
+    """Redirect user's browser directly to Google OAuth sign-in."""
     if not _youtube_enabled():
         raise HTTPException(status_code=400, detail="YouTube upload is disabled")
     try:
-        result = await asyncio.to_thread(authorize_client_interactive, client_id)
+        session_info = start_auth_session(client_id)
+        return RedirectResponse(session_info["auth_url"], status_code=302)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("YouTube authorize failed for %s: %s", client_id, exc)
+        logger.warning("YouTube start-auth failed for %s: %s", client_id, exc)
         return RedirectResponse(
             "/?youtube_flash=" + quote(f"{client_id}: auth failed ({exc})"),
             status_code=302,
         )
-    if result.get("ok"):
-        return RedirectResponse(
-            "/?youtube_flash=" + quote(f"{client_id}: authorized successfully"),
-            status_code=302,
-        )
-    return RedirectResponse(
-        "/?youtube_flash="
-        + quote(f"{client_id}: {result.get('detail') or 'authorization failed'}"),
-        status_code=302,
-    )
 
 
 @app.get("/videos/{run_id}/file")
