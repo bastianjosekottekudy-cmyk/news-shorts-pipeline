@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Run #{{ run.id }} — {{ run.section_name }}</title>
   <link rel="stylesheet" href="/static/style.css">
-  {% if run.status == 'running' or run.upload_status == 'uploading' %}
-  <meta http-equiv="refresh" content="10">
+  {% if run.status in ('running', 'queued') or run.upload_status == 'uploading' %}
+  <meta http-equiv="refresh" content="5">
   {% endif %}
 </head>
 <body>
@@ -28,7 +28,17 @@
       <button type="button" class="btn btn-upload" onclick="uploadRun({{ run.id }})">{{ run.upload_label }} to YouTube</button>
       {% endif %}
       {% endif %}
-      {% if run.status != 'running' and run.upload_status != 'uploading' %}
+      {% if run.status == 'running' %}
+      <button type="button" class="btn btn-danger" onclick="stopRun({{ run.id }})">Stop generation</button>
+      <button type="button" class="btn btn-secondary" disabled title="Job is running" style="opacity: 0.45; cursor: not-allowed;">Retry generation</button>
+      {% elif run.status == 'queued' %}
+      <button type="button" class="btn btn-danger" onclick="stopRun({{ run.id }})">Cancel generation</button>
+      <button type="button" class="btn btn-secondary" disabled title="Job is queued" style="opacity: 0.45; cursor: not-allowed;">Retry generation</button>
+      {% else %}
+      <button type="button" class="btn btn-retry" onclick="retryRun({{ run.id }}, {{ 'true' if run.has_video else 'false' }})">Retry generation</button>
+      <button type="button" class="btn btn-ghost" onclick="stopRun({{ run.id }})" title="Stop generation">Stop generation</button>
+      {% endif %}
+      {% if run.status != 'running' and run.status != 'queued' and run.upload_status != 'uploading' %}
       <button type="button" class="btn btn-danger" onclick='deleteRun({{ run.id }}, {{ run.video_title|tojson }})'>Delete permanently</button>
       {% endif %}
     </div>
@@ -49,6 +59,12 @@
     <p class="hint">Stored at <code>{{ run.video_path }}</code></p>
     {% elif run.status == 'running' %}
     <div class="placeholder">Short is still generating…</div>
+    {% elif run.status == 'queued' %}
+    <div class="placeholder queued">Short is queued (waiting for worker slot)…</div>
+    {% elif run.status == 'stopped' %}
+    <div class="placeholder stopped">Generation stopped by user</div>
+    {% elif run.status == 'failed' %}
+    <div class="placeholder failed">Generation failed</div>
     {% else %}
     <div class="placeholder">No local video file for this run.</div>
     {% endif %}
@@ -135,6 +151,42 @@
           window.location.href = '/';
         } else {
           alert(data.detail || 'Delete failed');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function stopRun(id) {
+      if (!confirm('Stop generation for run #' + id + '?')) return;
+      try {
+        const res = await fetch('/api/runs/' + id + '/stop', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          if (data.status === 'ignored') {
+            alert('Run #' + id + ' is not currently running.');
+          } else {
+            location.reload();
+          }
+        } else {
+          alert(data.detail || 'Failed to stop run');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function retryRun(id, hasVideo) {
+      if (hasVideo && !confirm('Run #' + id + ' already has a rendered video. Re-run and generate a new Short?')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/runs/' + id + '/retry', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          location.reload();
+        } else {
+          alert(data.detail || 'Failed to retry run');
         }
       } catch (e) {
         alert('Error: ' + e.message);

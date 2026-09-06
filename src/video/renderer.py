@@ -17,11 +17,37 @@ if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
+from proglog import MuteProgressBarLogger
+
 from src.config import load_pipeline_config
+from src.job_control import check_stop, get_current_run_id
 from src.naming import build_video_title, video_filename
 from src.titles.clarity import story_card
 
 logger = logging.getLogger(__name__)
+
+
+class RenderStopLogger(MuteProgressBarLogger):
+    """Proglog-compatible logger that checks for cancellation during video rendering."""
+
+    def __init__(self, run_id: int | None = None) -> None:
+        super().__init__()
+        self.run_id = run_id
+
+    def callback(self, **changes: Any) -> None:
+        check_stop(self.run_id)
+
+    def bars_callback(self, bar: str, attr: str, value: Any, old_value: Any = None) -> None:
+        check_stop(self.run_id)
+
+    def iter_bar(self, **kw: Any) -> Any:
+        check_stop(self.run_id)
+        for item in super().iter_bar(**kw):
+            check_stop(self.run_id)
+            yield item
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        check_stop(self.run_id)
 
 
 def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -260,11 +286,14 @@ def render_short(
     display_title: dict[str, str] | None = None,
     index: int | None = None,
     total: int | None = None,
+    run_id: int | None = None,
 ) -> str:
     """
     Render one 9:16 Short roundup.
     Slide groups: intro + one group per news story + outro (matches TTS segments).
     """
+    effective_run_id = run_id or get_current_run_id()
+    check_stop(effective_run_id)
     config = load_pipeline_config()
     video_cfg = config.get("video", {})
     width = int(video_cfg.get("width", 1080))
@@ -380,15 +409,30 @@ def render_short(
         "fps": fps,
         "codec": codec,
         "audio_codec": "aac",
-        "logger": None,
+        "logger": RenderStopLogger(effective_run_id),
         "ffmpeg_params": ffmpeg_params,
     }
     if codec == "libx264":
         write_kwargs["threads"] = 4
 
-    video.write_videofile(str(output_path), **write_kwargs)
-    logger.info("Wrote Short (%s, %.1fs): %s", codec, audio_duration, output_path)
-
-    video.close()
-    audio.close()
-    return str(output_path)
+    try:
+        check_stop(effective_run_id)
+        video.write_videofile(str(output_path), **write_kwargs)
+        logger.info("Wrote Short (%s, %.1fs): %s", codec, audio_duration, output_path)
+        return str(output_path)
+    except Exception:
+        if output_path.exists():
+            try:
+                output_path.unlink()
+            except Exception:
+                pass
+        raise
+    finally:
+        try:
+            video.close()
+        except Exception:
+            pass
+        try:
+            audio.close()
+        except Exception:
+            pass

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,8 @@ from src.config import (
     section_output_dir,
 )
 from src.db import store
+from src import job_control
+from src.job_control import JobStoppedError, check_stop, register_run, unregister_run
 from src.images.fetcher import fetch_images_for_news
 from src.images.keywords import enrich_news_with_image_queries
 from src.naming import build_video_title
@@ -48,6 +51,7 @@ def _attempt_youtube_upload(
 
     store.set_upload_status(run_id, "uploading", upload_error=None)
     store.append_step_log(run_id, "upload", "Uploading Short to YouTube")
+    check_stop(run_id, section.code)
     try:
         youtube_id = upload_short(
             video_path,
@@ -67,6 +71,9 @@ def _attempt_youtube_upload(
             run_id, "upload", f"Uploaded https://www.youtube.com/watch?v={youtube_id}"
         )
         return youtube_id
+    except JobStoppedError:
+        store.set_upload_status(run_id, "none", upload_error=None)
+        raise
     except YouTubeUploadError as exc:
         msg = str(exc)
         if "upload skipped" in msg.lower():
@@ -124,12 +131,15 @@ def run_single_short(
     if existing_run_id:
         store.update_run(
             run_id,
+            status="running",
+            started_at=datetime.now(timezone.utc).isoformat(),
             batch_id=batch_id,
             news_title=primary_title,
             section_code=section.code,
             section_name=section.name,
         )
 
+    register_run(run_id, section.code)
     output_dir = section_output_dir(section.code, run_date, run_id=run_id)
     logger.info(
         "Starting short run %s [%s] batch=%s → %s (%s stories)",
@@ -141,12 +151,14 @@ def run_single_short(
     )
 
     try:
+        check_stop(run_id, section.code)
         store.append_step_log(
             run_id,
             "start",
             f"{video_title} — {len(news_items)} stor{'y' if len(news_items)==1 else 'ies'}",
         )
 
+        check_stop(run_id, section.code)
         store.append_step_log(run_id, "titles", "Clarifying news headlines")
         news_items = clarify_news_titles(section, news_items)
         store.update_run(
@@ -156,6 +168,7 @@ def run_single_short(
             news_title=primary_title,
         )
 
+        check_stop(run_id, section.code)
         store.append_step_log(run_id, "image_keywords", "Extracting image search keywords")
         news_items = enrich_news_with_image_queries(section, news_items)
         store.update_run(
@@ -164,14 +177,17 @@ def run_single_short(
             news_link=str(news_items[0].get("link") or ""),
         )
 
+        check_stop(run_id, section.code)
         store.append_step_log(run_id, "images", "Fetching related images per story")
         images_by_story: list[list[str]] = []
         for i, item in enumerate(news_items, start=1):
+            check_stop(run_id, section.code)
             story_dir = output_dir / f"story_{i}"
             story_dir.mkdir(parents=True, exist_ok=True)
             imgs = fetch_images_for_news(item, story_dir, mock=mock_images)
             images_by_story.append(imgs)
 
+        check_stop(run_id, section.code)
         store.append_step_log(run_id, "overlay", "Writing on-screen titles")
         display_title = generate_display_title(
             section.name,
@@ -180,13 +196,16 @@ def run_single_short(
             story_count=len(news_items),
         )
 
+        check_stop(run_id, section.code)
         store.append_step_log(run_id, "script", "Generating Short narration")
         script_path = generate_script(section, news_items, output_dir)
         store.update_run(run_id, script_path=script_path)
 
+        check_stop(run_id, section.code)
         store.append_step_log(run_id, "tts", "Generating voiceover")
         audio_path = generate_narration(Path(script_path), section, output_dir)
 
+        check_stop(run_id, section.code)
         store.append_step_log(run_id, "render", "Rendering 9:16 Short")
         video_path = render_short(
             section.name,
@@ -198,9 +217,11 @@ def run_single_short(
             display_title=display_title,
             index=index,
             total=total,
+            run_id=run_id,
         )
         store.update_run(run_id, video_path=video_path)
 
+        check_stop(run_id, section.code)
         youtube_id = None
         should_upload = force_upload or (not skip_upload and _youtube_enabled())
         if should_upload:
@@ -240,11 +261,17 @@ def run_single_short(
         store.append_step_log(run_id, "done", "Short completed successfully")
         store.finish_run(run_id, "success")
         return run_id
+    except JobStoppedError as exc:
+        logger.info("Short run %s stopped: %s", run_id, exc)
+        store.stop_run(run_id, reason=str(exc))
+        return run_id
     except Exception as exc:
         logger.exception("Short run %s failed: %s", run_id, exc)
         store.append_step_log(run_id, "error", str(exc))
         store.finish_run(run_id, "failed", error_message=str(exc))
         raise
+    finally:
+        unregister_run(run_id)
 
 
 def run_section_batch(
@@ -257,6 +284,8 @@ def run_section_batch(
     news_count: int | None = None,
     shorts_count: int | None = None,
     count: int | None = None,
+    existing_run_id: int | None = None,
+    batch_id: int | None = None,
 ) -> list[int]:
     """
     Fetch `news_count` headlines.
@@ -271,7 +300,7 @@ def run_section_batch(
     fetch_n = max(1, int(fetch_n))
     # Always exactly one Short per section covering all fetched headlines
     _ = shorts_count  # ignored; kept for CLI back-compat
-    batch_id = store.next_batch_id()
+    batch_id = batch_id if batch_id is not None else store.next_batch_id()
     mock_images = news_provider == "mock"
 
     batch_dir = section_output_dir(section.code, run_date) / f"batch_{batch_id}"
@@ -283,15 +312,26 @@ def run_section_batch(
         section.code,
         fetch_n,
     )
-    news_items = fetch_section_news(
-        section,
-        batch_dir,
-        provider_name=news_provider,
-        max_items=fetch_n,
-    )
-    if not news_items:
-        raise RuntimeError(f"No news items fetched for section {section.code}")
+    check_stop(existing_run_id, section.code)
+    try:
+        news_items = fetch_section_news(
+            section,
+            batch_dir,
+            provider_name=news_provider,
+            max_items=fetch_n,
+        )
+        if not news_items:
+            raise RuntimeError(f"No news items fetched for section {section.code}")
+    except JobStoppedError:
+        if existing_run_id:
+            store.stop_run(existing_run_id, reason="Stopped by user")
+        raise
+    except Exception as exc:
+        if existing_run_id:
+            store.finish_run(existing_run_id, "failed", error_message=str(exc))
+        raise
 
+    check_stop(existing_run_id, section.code)
     run_ids: list[int] = []
     try:
         rid = run_single_short(
@@ -302,12 +342,22 @@ def run_section_batch(
             skip_upload=skip_upload,
             force_upload=force_upload,
             mock_images=mock_images,
+            existing_run_id=existing_run_id,
         )
         run_ids.append(rid)
-    except Exception:
+    except JobStoppedError:
+        logger.info("Batch %s for section %s stopped by user", batch_id, section.code)
+        if existing_run_id:
+            store.stop_run(existing_run_id, reason="Stopped by user")
+        return run_ids
+    except Exception as exc:
         logger.exception("Failed short in batch %s", batch_id)
+        if existing_run_id:
+            store.finish_run(existing_run_id, "failed", error_message=str(exc))
 
     if not run_ids:
+        if job_control.is_stop_requested(existing_run_id, section.code):
+            return run_ids
         raise RuntimeError(f"Short failed for section {section.code}")
     logger.info(
         "Batch %s complete for %s: 1 Short from %s headlines",
@@ -316,6 +366,62 @@ def run_section_batch(
         len(news_items),
     )
     return run_ids
+
+
+def retry_single_short(
+    run_id: int,
+    *,
+    mock: bool = False,
+    skip_upload: bool = True,
+    force_upload: bool = False,
+) -> int:
+    """
+    Retry a failed or stopped run, reusing existing headlines if available or fetching fresh ones.
+    Updates the existing run record rather than creating a new one.
+    """
+    run = store.get_run(run_id)
+    if not run:
+        raise ValueError(f"Run {run_id} not found")
+    if run.get("status") == "running":
+        raise ValueError(f"Run {run_id} is already running")
+
+    section = get_section(run["section_code"])
+    run_date = run.get("run_date") or local_run_date(section)
+    batch_id = int(run.get("batch_id") or store.next_batch_id())
+
+    store.reset_run_for_retry(run_id)
+    job_control.clear_stop(run_id, section.code)
+
+    news_items: list[dict[str, Any]] | None = None
+    if run.get("news_json"):
+        try:
+            parsed = json.loads(run["news_json"])
+            if isinstance(parsed, list) and parsed:
+                news_items = parsed
+        except Exception:
+            news_items = None
+
+    if not news_items:
+        batch_dir = section_output_dir(section.code, run_date) / f"batch_{batch_id}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        news_provider = "mock" if mock else "google_news_rss"
+        news_items = fetch_section_news(
+            section,
+            batch_dir,
+            provider_name=news_provider,
+            max_items=int(section.news_count),
+        )
+
+    return run_single_short(
+        section,
+        news_items,
+        run_date=run_date,
+        batch_id=batch_id,
+        skip_upload=skip_upload,
+        force_upload=force_upload,
+        mock_images=mock,
+        existing_run_id=run_id,
+    )
 
 
 def main() -> None:

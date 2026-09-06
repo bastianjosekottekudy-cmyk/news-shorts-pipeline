@@ -130,6 +130,7 @@ def create_run(
     *,
     batch_id: int | None = None,
     news_title: str | None = None,
+    status: str = "running",
 ) -> int:
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
@@ -139,12 +140,13 @@ def create_run(
                 section_code, section_name, run_date, status,
                 started_at, steps_log, upload_status, batch_id, news_title
             )
-            VALUES (?, ?, ?, 'running', ?, '[]', 'none', ?, ?)
+            VALUES (?, ?, ?, ?, ?, '[]', 'none', ?, ?)
             """,
             (
                 section_code.lower(),
                 section_name,
                 run_date,
+                status,
                 now,
                 batch_id,
                 news_title,
@@ -190,6 +192,45 @@ def finish_run(run_id: int, status: str, error_message: str | None = None) -> No
     )
 
 
+def stop_run(run_id: int, reason: str = "Stopped by user") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    update_run(
+        run_id,
+        status="stopped",
+        finished_at=now,
+        error_message=reason,
+    )
+    append_step_log(run_id, "stopped", reason)
+
+
+def reset_run_for_retry(run_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    update_run(
+        run_id,
+        status="running",
+        started_at=now,
+        finished_at=None,
+        error_message=None,
+        upload_status="none",
+        upload_error=None,
+    )
+    append_step_log(run_id, "retry", "Generation retry initiated")
+
+
+def queue_run_for_retry(run_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    update_run(
+        run_id,
+        status="queued",
+        started_at=now,
+        finished_at=None,
+        error_message=None,
+        upload_status="none",
+        upload_error=None,
+    )
+    append_step_log(run_id, "queued", "Generation retry queued")
+
+
 def set_upload_status(
     run_id: int,
     upload_status: str,
@@ -213,7 +254,7 @@ def fail_orphaned_runs(
     failed_ids: list[int] = []
     with db() as conn:
         rows = conn.execute(
-            "SELECT id FROM runs WHERE status = 'running'"
+            "SELECT id FROM runs WHERE status IN ('running', 'queued')"
         ).fetchall()
         ids = [int(row["id"]) for row in rows]
         if ids:
@@ -223,7 +264,7 @@ def fail_orphaned_runs(
                 SET status = 'failed',
                     finished_at = ?,
                     error_message = ?
-                WHERE status = 'running'
+                WHERE status IN ('running', 'queued')
                 """,
                 (now, error_message),
             )
@@ -351,12 +392,19 @@ def count_runs_today() -> dict[str, int]:
             "SELECT COUNT(*) FROM runs WHERE run_date = ? AND status = 'failed'",
             (today,),
         ).fetchone()[0]
+        stopped = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE run_date = ? AND status = 'stopped'",
+            (today,),
+        ).fetchone()[0]
         success = conn.execute(
             "SELECT COUNT(*) FROM runs WHERE run_date = ? AND status = 'success'",
             (today,),
         ).fetchone()[0]
         running = conn.execute(
             "SELECT COUNT(*) FROM runs WHERE status = 'running'", ()
+        ).fetchone()[0]
+        queued = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE status = 'queued'", ()
         ).fetchone()[0]
         uploading = conn.execute(
             "SELECT COUNT(*) FROM runs WHERE upload_status = 'uploading'", ()
@@ -365,6 +413,8 @@ def count_runs_today() -> dict[str, int]:
         "today_total": total,
         "today_success": success,
         "today_failed": failed,
+        "today_stopped": stopped,
         "running": running,
+        "queued": queued,
         "uploading": uploading,
     }

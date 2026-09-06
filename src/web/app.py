@@ -32,9 +32,11 @@ from src.config import (
     remove_section,
     update_section_schedule,
 )
+from src import job_control
+from src.job_control import JobStoppedError, check_stop
 from src.db import store
 from src.naming import title_from_video_path
-from src.pipeline import run_section_batch
+from src.pipeline import retry_single_short, run_section_batch
 from src.scheduler import get_next_run_times, reload_section_jobs
 from src.youtube.auth import (
     authorize_client_interactive,
@@ -75,7 +77,14 @@ _running_lock = threading.Lock()
 _running_sections: set[str] = set()
 _upload_lock = threading.Lock()
 _uploading_runs: set[int] = set()
-_generate_semaphore = threading.Semaphore(4)
+
+def _get_max_parallel() -> int:
+    try:
+        return max(1, int(load_pipeline_config().get("max_parallel_jobs", 4)))
+    except Exception:
+        return 4
+
+_generate_semaphore = threading.Semaphore(_get_max_parallel())
 
 
 def _youtube_enabled() -> bool:
@@ -240,12 +249,18 @@ def _enrich_run(run: dict[str, Any]) -> dict[str, Any]:
     run["youtube_url"] = (
         f"https://www.youtube.com/watch?v={yt_id}" if run["is_uploaded"] else ""
     )
-    run["can_upload"] = bool(run["has_video"] and run.get("status") != "running")
+    run["can_upload"] = bool(run["has_video"] and run.get("status") not in ("running", "queued"))
+    run["can_stop"] = bool(run.get("status") in ("running", "queued"))
+    run["can_retry"] = bool(run.get("status") not in ("running", "queued"))
     run["upload_label"] = (
         "Re-upload" if upload_status in ("uploaded", "failed") else "Upload"
     )
 
-    if upload_status == "uploading":
+    if run.get("status") == "queued":
+        run["display_status"] = "queued"
+    elif run.get("status") == "stopped":
+        run["display_status"] = "stopped"
+    elif upload_status == "uploading":
         run["display_status"] = "uploading"
     elif run["is_uploaded"]:
         run["display_status"] = "uploaded"
@@ -312,25 +327,53 @@ def _group_by_date(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _scheduled_run(section_code: str) -> None:
     code = section_code.lower()
-    with _generate_semaphore:
-        with _running_lock:
-            if code in _running_sections:
-                logger.warning(
-                    "Skipping scheduled run for %s — already running",
-                    code,
-                )
-                return
-            _running_sections.add(code)
-        try:
+    try:
+        section = next(s for s in load_sections() if s.code == code)
+    except StopIteration:
+        return
+
+    with _running_lock:
+        if code in _running_sections:
+            logger.warning(
+                "Skipping scheduled run for %s — already running or queued",
+                code,
+            )
+            return
+        _running_sections.add(code)
+
+    r_date = local_run_date(section)
+    b_id = store.next_batch_id()
+    rid = store.create_run(
+        section.code,
+        section.name,
+        r_date,
+        batch_id=b_id,
+        news_title=f"{section.name} Short",
+        status="queued",
+    )
+    store.append_step_log(rid, "queued", f"Scheduled run queued for section {section.name}")
+
+    try:
+        check_stop(rid, code)
+        with _generate_semaphore:
+            check_stop(rid, code)
+            store.update_run(rid, status="running")
             run_section_batch(
                 code,
+                run_date=r_date,
                 skip_upload=not _youtube_enabled(),
+                existing_run_id=rid,
+                batch_id=b_id,
             )
-        except Exception:
-            logger.exception("Scheduled run failed for %s", code)
-        finally:
-            with _running_lock:
-                _running_sections.discard(code)
+    except JobStoppedError:
+        logger.info("Scheduled run %s for %s stopped by user", rid, code)
+        store.stop_run(rid, reason="Stopped by user")
+    except Exception as exc:
+        logger.exception("Scheduled run failed for %s", code)
+        store.finish_run(rid, "failed", error_message=str(exc))
+    finally:
+        with _running_lock:
+            _running_sections.discard(code)
 
 
 def _retry_failed_uploads() -> None:
@@ -417,6 +460,7 @@ async def index(
         for s in sections
     ]
     has_running = any(r["status"] == "running" for r in runs) or stats.get("running", 0) > 0
+    has_queued = any(r["status"] == "queued" for r in runs) or stats.get("queued", 0) > 0
     has_uploading = (
         any(r.get("upload_status") == "uploading" for r in runs)
         or stats.get("uploading", 0) > 0
@@ -442,6 +486,7 @@ async def index(
             "filter_section": (section or "").lower(),
             "filter_date": date or "",
             "has_running": has_running,
+            "has_queued": has_queued,
             "has_uploading": has_uploading,
             "youtube_enabled": youtube_on,
             "youtube_clients": youtube_clients,
@@ -591,8 +636,8 @@ def _run_is_uploaded(run: dict[str, Any]) -> bool:
 
 def _delete_run_if_idle(run: dict[str, Any]) -> dict[str, Any]:
     run_id = int(run["id"])
-    if run.get("status") == "running":
-        return {"run_id": run_id, "ok": False, "reason": "running"}
+    if run.get("status") in ("running", "queued"):
+        return {"run_id": run_id, "ok": False, "reason": run.get("status")}
     if (run.get("upload_status") or "") == "uploading" or run_id in _uploading_runs:
         return {"run_id": run_id, "ok": False, "reason": "uploading"}
 
@@ -624,16 +669,18 @@ async def api_delete_run(run_id: int) -> JSONResponse:
 
 @app.post("/api/runs/delete-bulk")
 async def api_delete_runs_bulk(scope: str = "all") -> JSONResponse:
-    """Delete many local runs. scope: all | uploaded (local files + DB rows only)."""
+    """Delete many local runs. scope: all | uploaded | failed (local files + DB rows only)."""
     scope_key = (scope or "all").strip().lower()
-    if scope_key not in ("all", "uploaded"):
+    if scope_key not in ("all", "uploaded", "failed"):
         raise HTTPException(
-            status_code=400, detail="scope must be 'all' or 'uploaded'"
+            status_code=400, detail="scope must be 'all', 'uploaded', or 'failed'"
         )
 
     runs = store.list_runs(limit=5000)
     if scope_key == "uploaded":
         runs = [r for r in runs if _run_is_uploaded(r)]
+    elif scope_key == "failed":
+        runs = [r for r in runs if r.get("status") in ("failed", "stopped")]
 
     deleted: list[int] = []
     skipped: list[dict[str, Any]] = []
@@ -661,6 +708,12 @@ async def api_delete_runs_bulk(scope: str = "all") -> JSONResponse:
             "skipped": skipped,
         }
     )
+
+
+@app.post("/api/runs/delete-failed")
+async def api_delete_failed_runs() -> JSONResponse:
+    """Delete all failed and stopped runs from disk and database."""
+    return await api_delete_runs_bulk(scope="failed")
 
 
 @app.post("/api/runs/{run_id}/upload")
@@ -804,7 +857,6 @@ async def api_runs(
 @app.post("/api/trigger/{section_code}")
 async def api_trigger(
     section_code: str,
-    background_tasks: BackgroundTasks,
     mock: bool = False,
     async_run: bool = True,
 ) -> JSONResponse:
@@ -816,87 +868,300 @@ async def api_trigger(
 
     with _running_lock:
         if code in _running_sections:
-            raise HTTPException(status_code=409, detail=f"{code} is already running")
+            raise HTTPException(status_code=409, detail=f"{code} is already running or queued")
+        _running_sections.add(code)
+
+    r_date = local_run_date(section)
+    b_id = store.next_batch_id()
+    rid = store.create_run(
+        section.code,
+        section.name,
+        r_date,
+        batch_id=b_id,
+        news_title=f"{section.name} Short",
+        status="queued",
+    )
+    store.append_step_log(rid, "queued", f"Job queued for section {section.name}")
+
+    def _bg() -> None:
+        try:
+            check_stop(rid, code)
+            with _generate_semaphore:
+                check_stop(rid, code)
+                store.update_run(rid, status="running")
+                run_section_batch(
+                    code,
+                    run_date=r_date,
+                    news_provider="mock" if mock else "google_news_rss",
+                    skip_upload=not _youtube_enabled(),
+                    existing_run_id=rid,
+                    batch_id=b_id,
+                )
+        except JobStoppedError:
+            logger.info("Job %s for %s stopped by user", rid, code)
+            store.stop_run(rid, reason="Stopped by user")
+        except Exception as exc:
+            logger.exception("Background batch failed for %s", code)
+            store.finish_run(rid, "failed", error_message=str(exc))
+        finally:
+            with _running_lock:
+                _running_sections.discard(code)
 
     if async_run:
-
-        def _bg() -> None:
-            with _generate_semaphore:
-                with _running_lock:
-                    _running_sections.add(code)
-                try:
-                    run_section_batch(
-                        code,
-                        news_provider="mock" if mock else "google_news_rss",
-                        skip_upload=not _youtube_enabled(),
-                    )
-                except Exception:
-                    logger.exception("Background batch failed for %s", code)
-                finally:
-                    with _running_lock:
-                        _running_sections.discard(code)
-
-        background_tasks.add_task(_bg)
+        threading.Thread(target=_bg, name=f"run-{code}", daemon=True).start()
         return JSONResponse(
             {
-                "status": "started",
+                "status": "queued",
+                "run_id": rid,
                 "section": code,
                 "news_count": section.news_count,
             }
         )
 
-    with _generate_semaphore:
-        with _running_lock:
-            _running_sections.add(code)
-        try:
-            run_ids = run_section_batch(
-                code,
-                news_provider="mock" if mock else "google_news_rss",
-                skip_upload=not _youtube_enabled(),
-            )
-        finally:
-            with _running_lock:
-                _running_sections.discard(code)
+    _bg()
     return JSONResponse(
-        {"run_ids": run_ids, "status": "completed", "section": code}
+        {"run_ids": [rid], "status": "completed", "section": code}
     )
 
 
 @app.post("/api/trigger-all")
 async def api_trigger_all(
-    background_tasks: BackgroundTasks,
     mock: bool = False,
 ) -> JSONResponse:
     sections = load_sections()
+    started_sections: list[str] = []
+    skipped_sections: list[str] = []
+    queued_run_ids: list[int] = []
 
-    def _bg() -> None:
-        for section in sections:
-            code = section.code
+    def _worker(sec_code: str, rid: int, b_id: int, r_date: str) -> None:
+        try:
+            check_stop(rid, sec_code)
             with _generate_semaphore:
-                with _running_lock:
-                    if code in _running_sections:
-                        logger.warning("Skip %s — already running", code)
-                        continue
-                    _running_sections.add(code)
-                try:
-                    run_section_batch(
-                        code,
-                        news_provider="mock" if mock else "google_news_rss",
-                        skip_upload=not _youtube_enabled(),
-                    )
-                except Exception:
-                    logger.exception("Background batch failed for %s", code)
-                finally:
-                    with _running_lock:
-                        _running_sections.discard(code)
+                check_stop(rid, sec_code)
+                store.update_run(rid, status="running")
+                run_section_batch(
+                    sec_code,
+                    run_date=r_date,
+                    news_provider="mock" if mock else "google_news_rss",
+                    skip_upload=not _youtube_enabled(),
+                    existing_run_id=rid,
+                    batch_id=b_id,
+                )
+        except JobStoppedError:
+            logger.info("Job %s for %s stopped by user", rid, sec_code)
+            store.stop_run(rid, reason="Stopped by user")
+        except Exception as exc:
+            logger.exception("Background batch failed for %s", sec_code)
+            store.finish_run(rid, "failed", error_message=str(exc))
+        finally:
+            with _running_lock:
+                _running_sections.discard(sec_code)
 
-    background_tasks.add_task(_bg)
+    with _running_lock:
+        for section in sections:
+            code = section.code.lower()
+            if code in _running_sections:
+                logger.warning("Skip %s — already running or queued", code)
+                skipped_sections.append(code)
+                continue
+            _running_sections.add(code)
+            started_sections.append(code)
+
+            r_date = local_run_date(section)
+            b_id = store.next_batch_id()
+            rid = store.create_run(
+                section.code,
+                section.name,
+                r_date,
+                batch_id=b_id,
+                news_title=f"{section.name} Short",
+                status="queued",
+            )
+            store.append_step_log(rid, "queued", f"Job queued for section {section.name}")
+            queued_run_ids.append(rid)
+
+            threading.Thread(
+                target=_worker,
+                args=(code, rid, b_id, r_date),
+                name=f"batch-{code}",
+                daemon=True,
+            ).start()
+
     return JSONResponse(
         {
             "status": "started",
-            "sections": [s.code for s in sections],
+            "sections": started_sections,
+            "skipped": skipped_sections,
+            "queued_run_ids": queued_run_ids,
         }
     )
+
+
+@app.post("/api/runs/{run_id}/stop")
+def api_stop_run(run_id: int) -> JSONResponse:
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.get("status") not in ("running", "queued"):
+        return JSONResponse({
+            "status": "ignored",
+            "message": f"Run {run_id} is not running or queued (status: {run.get('status')})",
+            "run_id": run_id,
+        })
+
+    job_control.request_stop_run(run_id)
+    store.stop_run(run_id, reason="Stopped by user from dashboard")
+
+    sec_code = str(run.get("section_code", "")).lower()
+    if sec_code:
+        with _running_lock:
+            _running_sections.discard(sec_code)
+
+    return JSONResponse({"status": "stopped", "run_id": run_id, "section": sec_code})
+
+
+@app.post("/api/sections/{section_code}/stop")
+def api_stop_section(section_code: str) -> JSONResponse:
+    code = section_code.lower()
+    stopped_ids = job_control.request_stop_section(code)
+    for rid in stopped_ids:
+        store.stop_run(rid, reason=f"Stopped section '{code}' by user")
+    with store.db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM runs WHERE section_code = ? AND status IN ('running', 'queued')",
+            (code,),
+        ).fetchall()
+        for row in rows:
+            store.stop_run(int(row["id"]), reason=f"Stopped section '{code}' by user")
+    with _running_lock:
+        _running_sections.discard(code)
+    return JSONResponse({"status": "stopped", "section": code, "stopped_run_ids": stopped_ids})
+
+
+@app.post("/api/stop-all")
+def api_stop_all() -> JSONResponse:
+    stopped_ids = job_control.request_stop_all()
+    for rid in stopped_ids:
+        store.stop_run(rid, reason="Stopped all runs by user")
+    with store.db() as conn:
+        rows = conn.execute("SELECT id FROM runs WHERE status IN ('running', 'queued')").fetchall()
+        for row in rows:
+            store.stop_run(int(row["id"]), reason="Stopped all runs by user")
+    with _running_lock:
+        _running_sections.clear()
+    job_control.reset_stop_all()
+    return JSONResponse({"status": "stopped_all", "stopped_run_ids": stopped_ids})
+
+
+@app.post("/api/runs/{run_id}/retry")
+async def api_retry_run(
+    run_id: int,
+    mock: bool = False,
+    force_upload: bool = False,
+) -> JSONResponse:
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.get("status") in ("running", "queued"):
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is already running or queued")
+
+    sec_code = str(run.get("section_code", "")).lower()
+    job_control.clear_stop(run_id, sec_code)
+    with _running_lock:
+        if sec_code in _running_sections:
+            raise HTTPException(status_code=409, detail=f"Section '{sec_code}' is already running or queued")
+        _running_sections.add(sec_code)
+
+    store.queue_run_for_retry(run_id)
+
+    def _bg_retry() -> None:
+        try:
+            check_stop(run_id, sec_code)
+            with _generate_semaphore:
+                check_stop(run_id, sec_code)
+                retry_single_short(
+                    run_id,
+                    mock=mock,
+                    skip_upload=not _youtube_enabled(),
+                    force_upload=force_upload,
+                )
+        except JobStoppedError:
+            logger.info("Queued retry %s for %s stopped by user", run_id, sec_code)
+            store.stop_run(run_id, reason="Stopped by user")
+        except Exception as exc:
+            logger.exception("Retry failed for run %s", run_id)
+            store.finish_run(run_id, "failed", error_message=str(exc))
+        finally:
+            with _running_lock:
+                _running_sections.discard(sec_code)
+
+    threading.Thread(
+        target=_bg_retry,
+        name=f"retry-{run_id}",
+        daemon=True,
+    ).start()
+    return JSONResponse({"status": "retry_queued", "run_id": run_id, "section": sec_code})
+
+
+@app.post("/api/retry-failed")
+def api_retry_failed(
+    mock: bool = False,
+) -> JSONResponse:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with store.db() as conn:
+        rows = conn.execute(
+            "SELECT id, section_code FROM runs WHERE run_date = ? AND status IN ('failed', 'stopped') ORDER BY id ASC",
+            (today,),
+        ).fetchall()
+        runs_to_retry = [(int(r["id"]), str(r["section_code"]).lower()) for r in rows]
+
+    if not runs_to_retry:
+        return JSONResponse({"status": "none", "message": "No failed or stopped runs found for today"})
+
+    started_run_ids: list[int] = []
+    skipped_run_ids: list[int] = []
+
+    def _worker_retry(rid: int, code: str) -> None:
+        try:
+            check_stop(rid, code)
+            with _generate_semaphore:
+                check_stop(rid, code)
+                retry_single_short(
+                    rid,
+                    mock=mock,
+                    skip_upload=not _youtube_enabled(),
+                )
+        except JobStoppedError:
+            logger.info("Queued retry %s for %s stopped by user", rid, code)
+            store.stop_run(rid, reason="Stopped by user")
+        except Exception as exc:
+            logger.exception("Batch retry failed for run %s", rid)
+            store.finish_run(rid, "failed", error_message=str(exc))
+        finally:
+            with _running_lock:
+                _running_sections.discard(code)
+
+    with _running_lock:
+        for rid, code in runs_to_retry:
+            job_control.clear_stop(rid, code)
+            if code in _running_sections:
+                skipped_run_ids.append(rid)
+                continue
+            _running_sections.add(code)
+            store.queue_run_for_retry(rid)
+            started_run_ids.append(rid)
+            threading.Thread(
+                target=_worker_retry,
+                args=(rid, code),
+                name=f"retry-{rid}",
+                daemon=True,
+            ).start()
+
+    return JSONResponse({
+        "status": "retry_queued",
+        "retrying_run_ids": started_run_ids,
+        "skipped_run_ids": skipped_run_ids,
+    })
 
 
 def create_app() -> FastAPI:
