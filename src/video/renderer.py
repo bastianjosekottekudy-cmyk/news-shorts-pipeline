@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from proglog import MuteProgressBarLogger
 
 from src.config import load_pipeline_config
-from src.job_control import check_stop, get_current_run_id
+from src.job_control import JobStoppedError, check_stop, get_current_run_id
 from src.naming import build_video_title, video_filename
 from src.titles.clarity import story_card
 
@@ -261,6 +261,44 @@ def _resolve_encoder(video_cfg: dict[str, Any]) -> tuple[str, list[str]]:
     return "libx264", ["-preset", "veryfast", "-crf", "23"]
 
 
+def _safe_write_videofile(
+    video: Any,
+    target_path: Path,
+    write_kwargs: dict[str, Any],
+    effective_run_id: int | None = None,
+) -> str:
+    codec = write_kwargs.get("codec", "auto")
+    try:
+        if effective_run_id is not None:
+            check_stop(effective_run_id)
+        video.write_videofile(str(target_path), **write_kwargs)
+        return codec
+    except Exception as exc:
+        if isinstance(exc, JobStoppedError):
+            raise
+        if effective_run_id is not None:
+            check_stop(effective_run_id)
+        if codec == "h264_nvenc":
+            logger.warning(
+                "NVENC encode failed (%s); falling back to CPU libx264...",
+                exc,
+            )
+            if target_path.exists():
+                try:
+                    target_path.unlink()
+                except Exception:
+                    pass
+            fallback_kwargs = dict(write_kwargs)
+            fallback_kwargs["codec"] = "libx264"
+            fallback_kwargs["threads"] = 4
+            fallback_kwargs["ffmpeg_params"] = ["-preset", "veryfast", "-crf", "23"]
+            if effective_run_id is not None:
+                check_stop(effective_run_id)
+            video.write_videofile(str(target_path), **fallback_kwargs)
+            return "libx264"
+        raise
+
+
 def _load_segment_durations(output_dir: Path) -> list[dict[str, Any]] | None:
     meta_path = output_dir / "narration_segments.json"
     if not meta_path.exists():
@@ -417,8 +455,10 @@ def render_short(
 
     try:
         check_stop(effective_run_id)
-        video.write_videofile(str(output_path), **write_kwargs)
-        logger.info("Wrote Short (%s, %.1fs): %s", codec, audio_duration, output_path)
+        actual_codec = _safe_write_videofile(
+            video, output_path, write_kwargs, effective_run_id=effective_run_id
+        )
+        logger.info("Wrote Short (%s, %.1fs): %s", actual_codec, audio_duration, output_path)
         return str(output_path)
     except Exception:
         if output_path.exists():
