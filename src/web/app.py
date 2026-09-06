@@ -26,10 +26,12 @@ from src.config import (
     OUTPUT_DIR,
     add_section,
     get_section,
+    load_pipeline_concurrency,
     load_pipeline_config,
     load_sections,
     local_run_date,
     remove_section,
+    update_pipeline_concurrency,
     update_section_schedule,
 )
 from src import job_control
@@ -78,13 +80,51 @@ _running_sections: set[str] = set()
 _upload_lock = threading.Lock()
 _uploading_runs: set[int] = set()
 
-def _get_max_parallel() -> int:
-    try:
-        return max(1, int(load_pipeline_config().get("max_parallel_jobs", 4)))
-    except Exception:
-        return 4
+class ConcurrencyLimiter:
+    """Thread-safe dynamic concurrency limiter supporting runtime limit updates."""
 
-_generate_semaphore = threading.Semaphore(_get_max_parallel())
+    def __init__(self, limit: int = 5):
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._active = 0
+        self._limit = max(1, int(limit))
+
+    @property
+    def limit(self) -> int:
+        with self._lock:
+            return self._limit
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return self._active
+
+    def set_limit(self, new_limit: int) -> None:
+        with self._cv:
+            self._limit = max(1, int(new_limit))
+            self._cv.notify_all()
+
+    def acquire(self) -> None:
+        with self._cv:
+            while self._active >= self._limit:
+                self._cv.wait()
+            self._active += 1
+
+    def release(self) -> None:
+        with self._cv:
+            self._active = max(0, self._active - 1)
+            self._cv.notify_all()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+
+_concurrency_init = load_pipeline_concurrency()
+_generate_semaphore = ConcurrencyLimiter(_concurrency_init["effective_limit"])
 
 
 def _youtube_enabled() -> bool:
@@ -496,6 +536,9 @@ async def index(
             "youtube_flash": youtube_flash or "",
             "google_news_topics": GOOGLE_NEWS_TOPICS,
             "default_schedule_time": f"{DEFAULT_SCHEDULE_HOUR:02d}:{DEFAULT_SCHEDULE_MINUTE:02d}",
+            "concurrency_enabled": load_pipeline_concurrency()["concurrency_enabled"],
+            "max_parallel_jobs": load_pipeline_concurrency()["max_parallel_jobs"],
+            "effective_concurrency": _generate_semaphore.limit,
         },
     )
 
@@ -840,6 +883,72 @@ async def api_remove_section(section_code: str) -> JSONResponse:
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     reload_section_jobs()
     return JSONResponse({"ok": True, "removed": removed})
+
+
+@app.get("/api/concurrency")
+async def api_get_concurrency() -> JSONResponse:
+    state = load_pipeline_concurrency()
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": "ok",
+            "enabled": state["concurrency_enabled"],
+            "max_parallel_jobs": state["max_parallel_jobs"],
+            "effective_limit": _generate_semaphore.limit,
+            "active_jobs": _generate_semaphore.active_count,
+        }
+    )
+
+
+@app.post("/api/concurrency")
+async def api_set_concurrency(request: Request) -> JSONResponse:
+    payload: dict[str, Any] = {}
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    else:
+        try:
+            form = await request.form()
+            for k, v in form.items():
+                payload[k] = v
+        except Exception:
+            payload = {}
+
+    enabled: bool | None = None
+    if "enabled" in payload:
+        val = payload["enabled"]
+        if isinstance(val, bool):
+            enabled = val
+        elif isinstance(val, str):
+            enabled = val.strip().lower() in ("true", "1", "on", "yes")
+
+    max_parallel_jobs: int | None = None
+    if "max_parallel_jobs" in payload:
+        try:
+            max_parallel_jobs = int(payload["max_parallel_jobs"])
+        except (ValueError, TypeError):
+            pass
+
+    updated = update_pipeline_concurrency(
+        enabled=enabled,
+        max_parallel=max_parallel_jobs,
+    )
+    _generate_semaphore.set_limit(updated["effective_limit"])
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": "ok",
+            "message": "Concurrency settings updated",
+            "enabled": updated["concurrency_enabled"],
+            "max_parallel_jobs": updated["max_parallel_jobs"],
+            "effective_limit": updated["effective_limit"],
+            "active_jobs": _generate_semaphore.active_count,
+        }
+    )
 
 
 @app.get("/api/runs")

@@ -2,6 +2,7 @@ max_images_per_short: 4
 max_video_duration_sec: 90
 target_duration_sec: 70
 max_parallel_jobs: 5
+concurrency_enabled: true
 web:
   host: 127.0.0.1
   port: 8081

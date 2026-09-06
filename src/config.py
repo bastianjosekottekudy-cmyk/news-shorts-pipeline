@@ -337,6 +337,61 @@ def load_pipeline_config() -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def load_pipeline_concurrency() -> dict[str, Any]:
+    cfg = load_pipeline_config()
+    enabled = bool(cfg.get("concurrency_enabled", True))
+    max_parallel = max(1, int(cfg.get("max_parallel_jobs", 5)))
+    return {
+        "concurrency_enabled": enabled,
+        "max_parallel_jobs": max_parallel,
+        "effective_limit": max_parallel if enabled else 1,
+    }
+
+
+def update_pipeline_concurrency(
+    *,
+    enabled: bool | None = None,
+    max_parallel: int | None = None,
+) -> dict[str, Any]:
+    path = CONFIG_DIR / "pipeline.yaml"
+    text = path.read_text(encoding="utf-8")
+
+    if enabled is not None:
+        val_str = "true" if enabled else "false"
+        if re.search(r"^concurrency_enabled\s*:.*$", text, flags=re.MULTILINE):
+            text = re.sub(
+                r"^concurrency_enabled\s*:.*$",
+                f"concurrency_enabled: {val_str}",
+                text,
+                flags=re.MULTILINE,
+            )
+        else:
+            if re.search(r"^max_parallel_jobs\s*:.*$", text, flags=re.MULTILINE):
+                text = re.sub(
+                    r"^(max_parallel_jobs\s*:.*)$",
+                    rf"\1\nconcurrency_enabled: {val_str}",
+                    text,
+                    flags=re.MULTILINE,
+                )
+            else:
+                text = f"concurrency_enabled: {val_str}\n" + text
+
+    if max_parallel is not None:
+        clamped = min(max(int(max_parallel), 1), 20)
+        if re.search(r"^max_parallel_jobs\s*:.*$", text, flags=re.MULTILINE):
+            text = re.sub(
+                r"^max_parallel_jobs\s*:.*$",
+                f"max_parallel_jobs: {clamped}",
+                text,
+                flags=re.MULTILINE,
+            )
+        else:
+            text = f"max_parallel_jobs: {clamped}\n" + text
+
+    path.write_text(text, encoding="utf-8")
+    return load_pipeline_concurrency()
+
+
 def get_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
