@@ -28,7 +28,7 @@ sections:
   - tech
   - news
   - technology
-  schedule_enabled: true
+  schedule_enabled: false
   schedule_hour: 22
   schedule_minute: 0
   google_topic: TECHNOLOGY
@@ -86,7 +86,7 @@ sections:
   - gaming
   - games
   - news
-  schedule_enabled: true
+  schedule_enabled: false
   schedule_hour: 22
   schedule_minute: 0
   search_query: video games OR gaming OR PlayStation OR Xbox OR Nintendo OR Steam

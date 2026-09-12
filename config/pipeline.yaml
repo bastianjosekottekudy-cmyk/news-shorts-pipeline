@@ -14,11 +14,11 @@ video:
   format: mp4
   codec: auto
 tts:
-  provider: chirp3
-  gcp_voice: en-US-Chirp3-HD-Fenrir
+  provider: studio
+  gcp_voice: en-US-Studio-Q
   backup_voice: en-US-ChristopherNeural
-  backup_pitch: -8Hz
-  backup_rate: -4%
+  backup_pitch: -2Hz
+  backup_rate: 0%
   segment_pause_sec: 0.35
 script:
   provider: chain
