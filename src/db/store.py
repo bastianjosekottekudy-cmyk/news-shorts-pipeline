@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -58,6 +59,19 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS uploaded_topics (
+                topic_norm TEXT PRIMARY KEY,
+                topic_display TEXT NOT NULL,
+                section_code TEXT,
+                news_title TEXT,
+                news_link TEXT,
+                uploaded_at TEXT NOT NULL,
+                run_id INTEGER
+            )
+            """
+        )
         for column, decl in (
             ("section_code", "TEXT"),
             ("section_name", "TEXT"),
@@ -67,6 +81,7 @@ def init_db() -> None:
             ("news_link", "TEXT"),
             ("upload_status", "TEXT NOT NULL DEFAULT 'none'"),
             ("upload_error", "TEXT"),
+            ("dashboard_deleted", "INTEGER NOT NULL DEFAULT 0"),
         ):
             _ensure_column(conn, "runs", column, decl)
         conn.execute(
@@ -319,14 +334,90 @@ def delete_run(run_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def mark_run_dashboard_deleted(run_id: int) -> bool:
+    """Mark a run as removed from the dashboard view after automatic deletion."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET dashboard_deleted = 1 WHERE id = ?",
+            (run_id,),
+        )
+        return cur.rowcount > 0
+
+
+def normalize_topic_key(topic: str) -> str:
+    """Normalize topic / headline for collision-free comparison."""
+    if not topic:
+        return ""
+    cleaned = re.sub(r"[^\w\s]", " ", topic.lower().strip())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def record_uploaded_topic(
+    topic: str,
+    section_code: str | None = None,
+    news_title: str | None = None,
+    news_link: str | None = None,
+    run_id: int | None = None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    norm_topic = normalize_topic_key(topic)
+    if not norm_topic:
+        return
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO uploaded_topics (topic_norm, topic_display, section_code, news_title, news_link, uploaded_at, run_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (norm_topic, topic.strip(), section_code, news_title, news_link, now, run_id),
+        )
+        if news_title:
+            norm_title = normalize_topic_key(news_title)
+            if norm_title and norm_title != norm_topic:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO uploaded_topics (topic_norm, topic_display, section_code, news_title, news_link, uploaded_at, run_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (norm_title, news_title.strip(), section_code, news_title.strip(), news_link, now, run_id),
+                )
+
+
+def is_topic_uploaded(topic: str) -> bool:
+    norm = normalize_topic_key(topic)
+    if not norm:
+        return False
+    with db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM uploaded_topics WHERE topic_norm = ? LIMIT 1",
+            (norm,),
+        ).fetchone()
+        if row:
+            return True
+        run_row = conn.execute(
+            """
+            SELECT 1 FROM runs
+            WHERE upload_status = 'uploaded'
+              AND (youtube_video_id IS NOT NULL AND youtube_video_id != '' AND youtube_video_id != 'skipped')
+              AND (news_title = ? OR section_code = ?)
+            LIMIT 1
+            """,
+            (topic, topic),
+        ).fetchone()
+        return bool(run_row)
+
+
 def list_runs(
     section_code: str | None = None,
     run_date: str | None = None,
     limit: int = 200,
+    include_dashboard_deleted: bool = False,
 ) -> list[dict[str, Any]]:
     query = "SELECT * FROM runs"
     clauses: list[str] = []
     params: list[Any] = []
+    if not include_dashboard_deleted:
+        clauses.append("(dashboard_deleted = 0 OR dashboard_deleted IS NULL)")
     if section_code:
         clauses.append("section_code = ?")
         params.append(section_code.lower())
@@ -377,7 +468,11 @@ def count_failed_uploads() -> int:
 def list_run_dates() -> list[str]:
     with db() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT run_date FROM runs ORDER BY run_date DESC"
+            """
+            SELECT DISTINCT run_date FROM runs
+            WHERE (dashboard_deleted = 0 OR dashboard_deleted IS NULL)
+            ORDER BY run_date DESC
+            """
         ).fetchall()
         return [row[0] for row in rows]
 

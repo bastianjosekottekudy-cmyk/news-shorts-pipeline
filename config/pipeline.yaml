@@ -37,6 +37,7 @@ images:
   max_queries_per_story: 3
 youtube:
   enabled: true
+  delete_after_upload: true
   category_id: '25'
   privacy: public
   made_for_kids: false

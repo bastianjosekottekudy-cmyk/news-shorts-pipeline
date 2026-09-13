@@ -16,6 +16,7 @@ from src.config import (
     load_sections,
     local_run_date,
     section_output_dir,
+    should_delete_after_upload,
 )
 from src.db import store
 from src import job_control
@@ -46,8 +47,30 @@ def _attempt_youtube_upload(
     *,
     index: int | None = None,
     total: int | None = None,
+    delete_after_upload: bool | None = None,
+    force_upload: bool = False,
 ) -> str | None:
     from src.youtube.uploader import YouTubeUploadError, upload_short
+
+    run = store.get_run(run_id) or {}
+    primary_title = str(run.get("news_title") or (news_items[0].get("title") if news_items else "") or "").strip()
+    primary_link = str(run.get("news_link") or (news_items[0].get("link") if news_items else "") or "").strip()
+
+    # Prevent re-uploading an already uploaded topic/short
+    if not force_upload:
+        if (
+            run.get("upload_status") == "uploaded"
+            and run.get("youtube_video_id")
+            and run.get("youtube_video_id") != "skipped"
+        ):
+            logger.info("Run %s already uploaded as %s; skipping re-upload", run_id, run.get("youtube_video_id"))
+            return str(run.get("youtube_video_id"))
+
+        if primary_title and store.is_topic_uploaded(primary_title):
+            logger.warning("Topic/headline %r already uploaded to YouTube; skipping re-upload for run %s", primary_title, run_id)
+            store.set_upload_status(run_id, "none", upload_error=None)
+            store.append_step_log(run_id, "upload", f"Topic '{primary_title}' already uploaded to YouTube; skipped re-upload")
+            return None
 
     store.set_upload_status(run_id, "uploading", upload_error=None)
     store.append_step_log(run_id, "upload", "Uploading Short to YouTube")
@@ -70,6 +93,39 @@ def _attempt_youtube_upload(
         store.append_step_log(
             run_id, "upload", f"Uploaded https://www.youtube.com/watch?v={youtube_id}"
         )
+        if primary_title:
+            store.record_uploaded_topic(
+                topic=primary_title,
+                section_code=section.code,
+                news_title=primary_title,
+                news_link=primary_link,
+                run_id=run_id,
+            )
+        if should_delete_after_upload(delete_after_upload):
+            try:
+                p = Path(video_path)
+                if p.is_file():
+                    p.unlink()
+                    logger.info(
+                        "Deleted local video after upload for run %s: %s",
+                        run_id,
+                        video_path,
+                    )
+                    store.append_step_log(
+                        run_id, "cleanup", f"Deleted local video: {p.name}"
+                    )
+                store.mark_run_dashboard_deleted(run_id)
+                logger.info("Removed uploaded run %s from dashboard", run_id)
+                store.append_step_log(
+                    run_id, "cleanup", "Deleted uploaded item from dashboard"
+                )
+            except Exception as del_exc:
+                logger.warning(
+                    "Failed to delete local video/dashboard item for run %s (%s): %s",
+                    run_id,
+                    video_path,
+                    del_exc,
+                )
         return youtube_id
     except JobStoppedError:
         store.set_upload_status(run_id, "none", upload_error=None)
@@ -106,6 +162,7 @@ def run_single_short(
     batch_id: int,
     skip_upload: bool = True,
     force_upload: bool = False,
+    delete_after_upload: bool | None = None,
     mock_images: bool = False,
     existing_run_id: int | None = None,
     index: int | None = None,
@@ -233,6 +290,8 @@ def run_single_short(
                 run_date,
                 index=index,
                 total=total,
+                delete_after_upload=delete_after_upload,
+                force_upload=force_upload,
             )
         else:
             store.append_step_log(
@@ -253,6 +312,7 @@ def run_single_short(
             "video_title": video_title,
             "video_path": video_path,
             "youtube_video_id": youtube_id,
+            "video_deleted": bool(youtube_id and not Path(video_path).is_file()),
         }
         (output_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
@@ -260,6 +320,10 @@ def run_single_short(
 
         store.append_step_log(run_id, "done", "Short completed successfully")
         store.finish_run(run_id, "success")
+        if should_upload and should_delete_after_upload(delete_after_upload):
+            curr_run = store.get_run(run_id)
+            if curr_run and curr_run.get("upload_status") == "uploaded":
+                store.mark_run_dashboard_deleted(run_id)
         return run_id
     except JobStoppedError as exc:
         logger.info("Short run %s stopped: %s", run_id, exc)
@@ -281,6 +345,7 @@ def run_section_batch(
     news_provider: str = "google_news_rss",
     skip_upload: bool = True,
     force_upload: bool = False,
+    delete_after_upload: bool | None = None,
     news_count: int | None = None,
     shorts_count: int | None = None,
     count: int | None = None,
@@ -341,6 +406,7 @@ def run_section_batch(
             batch_id=batch_id,
             skip_upload=skip_upload,
             force_upload=force_upload,
+            delete_after_upload=delete_after_upload,
             mock_images=mock_images,
             existing_run_id=existing_run_id,
         )
@@ -374,6 +440,7 @@ def retry_single_short(
     mock: bool = False,
     skip_upload: bool = True,
     force_upload: bool = False,
+    delete_after_upload: bool | None = None,
 ) -> int:
     """
     Retry a failed or stopped run, reusing existing headlines if available or fetching fresh ones.
@@ -419,6 +486,7 @@ def retry_single_short(
         batch_id=batch_id,
         skip_upload=skip_upload,
         force_upload=force_upload,
+        delete_after_upload=delete_after_upload,
         mock_images=mock,
         existing_run_id=run_id,
     )
@@ -448,6 +516,19 @@ def main() -> None:
     )
     parser.add_argument("--mock", action="store_true", help="Use mock news + placeholder images")
     parser.add_argument("--upload", action="store_true", help="Force YouTube upload")
+    parser.add_argument(
+        "--delete-after-upload",
+        action="store_true",
+        default=None,
+        help="Delete local video file after successful YouTube upload (default: true)",
+    )
+    parser.add_argument(
+        "--keep-video",
+        "--no-delete-after-upload",
+        dest="delete_after_upload",
+        action="store_false",
+        help="Keep local video file after YouTube upload (do not auto-delete)",
+    )
     parser.add_argument("--all", action="store_true", help="Run all sections")
     args = parser.parse_args()
 
@@ -475,6 +556,7 @@ def main() -> None:
             news_provider=news_provider,
             skip_upload=skip_upload,
             force_upload=args.upload,
+            delete_after_upload=args.delete_after_upload,
             news_count=args.news_count,
             shorts_count=args.shorts_count,
             count=args.count,

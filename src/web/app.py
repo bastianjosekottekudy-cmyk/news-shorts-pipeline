@@ -31,6 +31,8 @@ from src.config import (
     load_sections,
     local_run_date,
     remove_section,
+    should_delete_after_upload,
+    update_delete_after_upload,
     update_pipeline_concurrency,
     update_section_schedule,
 )
@@ -354,6 +356,7 @@ def _upload_run_video(run_id: int) -> None:
         section,
         news_items,
         str(run.get("run_date") or local_run_date(section)),
+        delete_after_upload=should_delete_after_upload(),
     )
 
 
@@ -536,6 +539,7 @@ async def index(
             "youtube_flash": youtube_flash or "",
             "google_news_topics": GOOGLE_NEWS_TOPICS,
             "default_schedule_time": f"{DEFAULT_SCHEDULE_HOUR:02d}:{DEFAULT_SCHEDULE_MINUTE:02d}",
+            "delete_after_upload": should_delete_after_upload(),
             "concurrency_enabled": load_pipeline_concurrency()["concurrency_enabled"],
             "max_parallel_jobs": load_pipeline_concurrency()["max_parallel_jobs"],
             "effective_concurrency": _generate_semaphore.limit,
@@ -770,6 +774,11 @@ async def api_upload_run(run_id: int, background_tasks: BackgroundTasks) -> JSON
         raise HTTPException(status_code=400, detail="No local video to upload")
     if (run.get("upload_status") or "") == "uploading":
         raise HTTPException(status_code=409, detail="Upload already in progress")
+    if run.get("upload_status") == "uploaded" and run.get("youtube_video_id") and run.get("youtube_video_id") != "skipped":
+        raise HTTPException(status_code=409, detail="This topic/short has already been uploaded to YouTube.")
+    title = str(run.get("news_title") or "").strip()
+    if title and store.is_topic_uploaded(title):
+        raise HTTPException(status_code=409, detail=f"Topic '{title}' has already been uploaded to YouTube.")
 
     with _upload_lock:
         if run_id in _uploading_runs:
@@ -949,6 +958,40 @@ async def api_set_concurrency(request: Request) -> JSONResponse:
             "active_jobs": _generate_semaphore.active_count,
         }
     )
+
+
+@app.get("/api/settings/delete-after-upload")
+async def api_get_delete_after_upload() -> JSONResponse:
+    return JSONResponse({"ok": True, "enabled": should_delete_after_upload()})
+
+
+@app.post("/api/settings/delete-after-upload")
+async def api_set_delete_after_upload(request: Request) -> JSONResponse:
+    payload: dict[str, Any] = {}
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    else:
+        try:
+            form = await request.form()
+            for k, v in form.items():
+                payload[k] = v
+        except Exception:
+            payload = {}
+
+    enabled = True
+    if "enabled" in payload:
+        val = payload["enabled"]
+        if isinstance(val, bool):
+            enabled = val
+        elif isinstance(val, str):
+            enabled = val.strip().lower() in ("true", "1", "on", "yes")
+
+    updated = update_delete_after_upload(enabled)
+    return JSONResponse({"ok": True, "enabled": updated})
 
 
 @app.get("/api/runs")
