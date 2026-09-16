@@ -97,7 +97,7 @@ def _wikimedia_urls(client: httpx.Client, query: str, limit: int) -> list[str]:
                 "gsrnamespace": 6,
                 "prop": "imageinfo",
                 "iiprop": "url|mime|size",
-                "iiurlwidth": 1080,
+                "iiurlwidth": 1920,
                 "format": "json",
             },
             timeout=20.0,
@@ -230,15 +230,25 @@ def _resolve_story_queries(news_item: dict[str, Any]) -> tuple[str, list[str]]:
 def _make_placeholder(dest: Path, label: str) -> None:
     from PIL import Image, ImageDraw, ImageFont
 
-    img = Image.new("RGB", (1080, 1920), color=(22, 32, 48))
+    config = load_pipeline_config()
+    video_cfg = config.get("video") or {}
+    width = int(video_cfg.get("width", 1080))
+    height = int(video_cfg.get("height", 1920))
+
+    img = Image.new("RGB", (width, height), color=(22, 32, 48))
     draw = ImageDraw.Draw(img)
     try:
         font = ImageFont.truetype("C:/Windows/Fonts/segoeuib.ttf", 48)
     except OSError:
-        font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+        except OSError:
+            font = ImageFont.load_default()
     text = (label or "News")[:80]
-    draw.rectangle([(40, 800), (1040, 1120)], fill=(40, 70, 110))
-    draw.text((80, 900), text, fill=(255, 255, 255), font=font)
+    box_top = int(height * 0.42)
+    box_bottom = box_top + int(height * 0.16)
+    draw.rectangle([(40, box_top), (width - 40, box_bottom)], fill=(40, 70, 110))
+    draw.text((80, box_top + 40), text, fill=(255, 255, 255), font=font)
     dest.parent.mkdir(parents=True, exist_ok=True)
     img.save(dest, format="JPEG", quality=85)
 

@@ -435,7 +435,9 @@ select {
   width: 100%;
   border-radius: 8px;
   background: #000;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 9 / 16;
+  max-height: 520px;
+  margin: 0 auto;
 }
 
 .detail-player {
@@ -443,7 +445,9 @@ select {
 }
 
 .placeholder {
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 9 / 16;
+  max-height: 520px;
+  margin: 0 auto;
   border-radius: 8px;
   background: #0b1220;
   border: 1px dashed #2a3a55;

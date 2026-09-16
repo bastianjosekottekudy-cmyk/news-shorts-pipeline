@@ -15,7 +15,7 @@ _system_ffmpeg = shutil.which("ffmpeg")
 if _system_ffmpeg and "IMAGEIO_FFMPEG_EXE" not in os.environ:
     os.environ["IMAGEIO_FFMPEG_EXE"] = _system_ffmpeg
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from proglog import MuteProgressBarLogger
 
@@ -85,6 +85,13 @@ def _cover_resize(img: Image.Image, width: int, height: int) -> Image.Image:
     left = (new_w - width) // 2
     top = (new_h - height) // 2
     return img.crop((left, top, left + width, top + height))
+
+
+def _fit_contain(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
+    src_w, src_h = img.size
+    scale = min(max_w / src_w, max_h / src_h)
+    new_w, new_h = max(1, int(src_w * scale)), max(1, int(src_h * scale))
+    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
 def _draw_gradient(draw: ImageDraw.ImageDraw, width: int, height: int) -> None:
@@ -201,9 +208,40 @@ def _make_image_slide(
     title: str,
     subtitle: str,
 ) -> Image.Image:
+    vertical = height > width
     try:
         base = Image.open(image_path).convert("RGB")
-        base = _cover_resize(base, width, height)
+        if vertical:
+            src_w, src_h = base.size
+            target_ratio = width / height  # 1080 / 1920 = 0.5625
+            img_ratio = src_w / max(1, src_h)
+            # If image is landscape or square (wider than vertical short aspect ratio),
+            # enforce correct aspect ratio without severe center-cropping.
+            if img_ratio > target_ratio * 1.05:
+                # 1. Background: blurred and dimmed cover filling the 9:16 frame
+                bg = _cover_resize(base, width, height)
+                bg = bg.filter(ImageFilter.GaussianBlur(radius=25))
+                bg = ImageEnhance.Brightness(bg).enhance(0.42)
+
+                # 2. Foreground: preserve true aspect ratio, fit within visible upper zone
+                fg_max_w = width
+                fg_max_h = int(height * 0.60)
+                fg = _fit_contain(base, fg_max_w, fg_max_h)
+                fg_w, fg_h = fg.size
+
+                # Center horizontally, place in upper visual area above title block
+                fg_x = (width - fg_w) // 2
+                visual_top = int(height * 0.04)
+                visual_bottom = int(height * 0.58)
+                fg_y = visual_top + max(0, (visual_bottom - visual_top - fg_h) // 2)
+
+                bg.paste(fg, (fg_x, fg_y))
+                base = bg
+            else:
+                base = _cover_resize(base, width, height)
+        else:
+            base = _cover_resize(base, width, height)
+
         base = ImageEnhance.Brightness(base).enhance(0.65)
         base = ImageEnhance.Contrast(base).enhance(1.08)
     except Exception as exc:

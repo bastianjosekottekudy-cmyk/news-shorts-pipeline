@@ -28,9 +28,9 @@ sections:
   - tech
   - news
   - technology
-  schedule_enabled: false
+  schedule_enabled: true
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   google_topic: TECHNOLOGY
 - code: entertainment
   name: Entertainment
@@ -44,7 +44,7 @@ sections:
   - news
   schedule_enabled: true
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   google_topic: ENTERTAINMENT
 - code: global
   name: Global News
@@ -59,7 +59,7 @@ sections:
   - global
   schedule_enabled: false
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   google_topic: WORLD
 - code: business
   name: Business
@@ -73,7 +73,7 @@ sections:
   - news
   schedule_enabled: false
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   google_topic: BUSINESS
 - code: gaming
   name: Gaming
@@ -88,7 +88,7 @@ sections:
   - news
   schedule_enabled: false
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   search_query: video games OR gaming OR PlayStation OR Xbox OR Nintendo OR Steam
 - code: us
   name: US
@@ -101,9 +101,9 @@ sections:
   - us
   - america
   - news
-  schedule_enabled: true
+  schedule_enabled: false
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   google_topic: NATION
 - code: uk
   name: UK
@@ -116,9 +116,9 @@ sections:
   - uk
   - britain
   - news
-  schedule_enabled: true
+  schedule_enabled: false
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   google_topic: NATION
 - code: cyprus
   name: Cyprus
@@ -130,9 +130,9 @@ sections:
   - shorts
   - cyprus
   - news
-  schedule_enabled: true
+  schedule_enabled: false
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   search_query: Cyprus OR Cypriot OR Nicosia OR Limassol
 - code: india
   name: India
@@ -146,5 +146,5 @@ sections:
   - news
   schedule_enabled: false
   schedule_hour: 22
-  schedule_minute: 0
+  schedule_minute: 15
   google_topic: NATION
