@@ -1,0 +1,19 @@
+[Unit]
+Description=News Shorts Pipeline Dashboard & Scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/news-shorts-pipeline
+ExecStart=%h/Projects/news-shorts-pipeline/.venv/bin/python -m src.main
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Kolkata
+Environment=IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
+
+[Install]
+WantedBy=default.target

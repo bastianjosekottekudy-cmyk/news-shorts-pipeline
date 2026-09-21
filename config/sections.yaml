@@ -130,7 +130,7 @@ sections:
   - shorts
   - cyprus
   - news
-  schedule_enabled: false
+  schedule_enabled: true
   schedule_hour: 22
   schedule_minute: 15
   search_query: Cyprus OR Cypriot OR Nicosia OR Limassol

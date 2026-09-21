@@ -4,7 +4,7 @@ target_duration_sec: 70
 max_parallel_jobs: 5
 concurrency_enabled: true
 web:
-  host: 127.0.0.1
+  host: 0.0.0.0
   port: 8081
 video:
   width: 1080

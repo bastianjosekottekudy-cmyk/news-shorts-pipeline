@@ -16,11 +16,12 @@ import uvicorn
 from src.config import load_pipeline_config
 from src.db import store
 from src.scheduler import (
+    FAILED_RUNS_RETRY_INTERVAL_HOURS,
     UPLOAD_RETRY_INTERVAL_HOURS,
     shutdown_scheduler,
     start_scheduler,
 )
-from src.web.app import _retry_failed_uploads, _scheduled_run, app
+from src.web.app import _retry_failed_runs, _retry_failed_uploads, _scheduled_run, app
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +46,31 @@ def main() -> None:
     host = web_cfg.get("host", "127.0.0.1")
     port = int(web_cfg.get("port", 8081))
 
-    start_scheduler(_scheduled_run, retry_uploads_callback=_retry_failed_uploads)
+    start_scheduler(
+        _scheduled_run,
+        retry_uploads_callback=_retry_failed_uploads,
+        retry_failed_runs_callback=_retry_failed_runs,
+    )
     logger.info("Scheduler started — per-section IST times (default 10:00 PM)")
     failed_uploads = store.count_failed_uploads()
     if failed_uploads:
         logger.info(
-            "%s failed YouTube upload(s) pending — retry job armed (every %sh, max 10 per run while failures remain)",
+            "%s failed YouTube upload(s) pending — upload retry job armed (every %sh, max 10 per run)",
             failed_uploads,
             UPLOAD_RETRY_INTERVAL_HOURS,
         )
     else:
-        logger.info("No failed YouTube uploads — retry job not scheduled")
+        logger.info("No failed YouTube uploads — upload retry job not scheduled")
+
+    recent_failed = store.count_recent_failed_runs(hours=24)
+    if recent_failed:
+        logger.info(
+            "%s failed run(s) from last 24h pending — 1-hour generation retry job armed",
+            recent_failed,
+        )
+    else:
+        logger.info("No recent failed runs — 1-hour generation retry job idle")
+
     logger.info("Dashboard: http://%s:%s", host, port)
 
     try:

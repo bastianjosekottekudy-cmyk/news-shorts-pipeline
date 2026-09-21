@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import os
+import secrets
 import shutil
 import threading
 from collections import OrderedDict
@@ -18,6 +21,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from src.config import (
     DEFAULT_SCHEDULE_HOUR,
@@ -74,7 +79,43 @@ class NewSectionIn(BaseModel):
 WEB_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        user_expected = os.getenv("DASHBOARD_USERNAME")
+        pass_expected = os.getenv("DASHBOARD_PASSWORD")
+        # If credentials are not configured, allow access
+        if not user_expected or not pass_expected:
+            return await call_next(request)
+
+        # Allow external OAuth callback without auth if needed
+        if request.url.path.startswith("/api/youtube/oauth/callback"):
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Basic "):
+            return Response(
+                content="Authentication required",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="News Shorts Dashboard"'},
+            )
+        try:
+            auth_decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+            username, _, password = auth_decoded.partition(":")
+            if not (
+                secrets.compare_digest(username, user_expected)
+                and secrets.compare_digest(password, pass_expected)
+            ):
+                raise ValueError("Invalid credentials")
+        except Exception:
+            return Response(
+                content="Invalid credentials",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="News Shorts Dashboard"'},
+            )
+        return await call_next(request)
+
 app = FastAPI(title="News Shorts Library")
+app.add_middleware(BasicAuthMiddleware)
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
 _running_lock = threading.Lock()
@@ -472,6 +513,62 @@ def _retry_failed_uploads() -> None:
 
     # Keep or clear the job based on whether failures remain.
     sync_failed_upload_retry_job()
+
+
+def _retry_failed_runs() -> None:
+    """Hourly background retry for runs whose video generation failed/stopped in the last 24h."""
+    recent_failed = store.list_recent_failed_runs(hours=24, limit=10)
+    if not recent_failed:
+        from src.scheduler import sync_failed_runs_retry_job
+
+        sync_failed_runs_retry_job()
+        return
+
+    logger.info("Hourly retry worker: found %s failed/stopped run(s) from last 24h", len(recent_failed))
+    for run in recent_failed:
+        run_id = int(run["id"])
+        code = str(run["section_code"]).lower()
+        with _running_lock:
+            if code in _running_sections:
+                logger.info("Skipping hourly retry for run %s (%s) — section already active", run_id, code)
+                continue
+            _running_sections.add(code)
+
+        store.queue_run_for_retry(run_id)
+        store.append_step_log(run_id, "retry", "Hourly scheduled retry initiated (last 24h window)")
+
+        def _worker(rid: int, scode: str) -> None:
+            try:
+                check_stop(rid, scode)
+                with _generate_semaphore:
+                    check_stop(rid, scode)
+                    retry_single_short(
+                        rid,
+                        skip_upload=not _youtube_enabled(),
+                    )
+            except JobStoppedError:
+                logger.info("Hourly retry %s for %s stopped by user", rid, scode)
+                store.stop_run(rid, reason="Stopped by user")
+            except Exception as exc:
+                logger.exception("Hourly retry failed for run %s", rid)
+                store.finish_run(rid, "failed", error_message=str(exc))
+            finally:
+                with _running_lock:
+                    _running_sections.discard(scode)
+                from src.scheduler import sync_failed_runs_retry_job
+
+                sync_failed_runs_retry_job()
+
+        threading.Thread(
+            target=_worker,
+            args=(run_id, code),
+            name=f"hourly-retry-{run_id}",
+            daemon=True,
+        ).start()
+
+    from src.scheduler import sync_failed_runs_retry_job
+
+    sync_failed_runs_retry_job()
 
 
 @app.get("/", response_class=HTMLResponse)
