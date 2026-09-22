@@ -331,6 +331,10 @@ def get_run(run_id: int) -> dict[str, Any] | None:
 def delete_run(run_id: int) -> bool:
     with db() as conn:
         cur = conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        try:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        except Exception:
+            pass
         return cur.rowcount > 0
 
 
@@ -341,6 +345,10 @@ def mark_run_dashboard_deleted(run_id: int) -> bool:
             "UPDATE runs SET dashboard_deleted = 1 WHERE id = ?",
             (run_id,),
         )
+        try:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        except Exception:
+            pass
         return cur.rowcount > 0
 
 
