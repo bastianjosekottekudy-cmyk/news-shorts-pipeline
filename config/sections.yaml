@@ -31,12 +31,12 @@ sections:
   schedule_enabled: true
   schedule_hour: 22
   schedule_minute: 15
-  google_topic: TECHNOLOGY
   rss_feeds:
   - https://feeds.arstechnica.com/arstechnica/index
   - https://www.theverge.com/rss/index.xml
   - https://techcrunch.com/feed/
   - https://feeds.bbci.co.uk/news/technology/rss.xml
+  google_topic: TECHNOLOGY
 - code: entertainment
   name: Entertainment
   news_count: 5
@@ -50,11 +50,11 @@ sections:
   schedule_enabled: true
   schedule_hour: 22
   schedule_minute: 15
-  google_topic: ENTERTAINMENT
   rss_feeds:
   - https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml
   - https://variety.com/feed/
   - https://deadline.com/feed/
+  google_topic: ENTERTAINMENT
 - code: global
   name: Global News
   news_count: 5
@@ -68,12 +68,12 @@ sections:
   - global
   schedule_enabled: true
   schedule_hour: 22
-  schedule_minute: 20
-  google_topic: WORLD
+  schedule_minute: 15
   rss_feeds:
   - https://feeds.bbci.co.uk/news/world/rss.xml
   - https://www.aljazeera.com/xml/rss/all.xml
   - https://feeds.npr.org/1004/rss.xml
+  google_topic: WORLD
 - code: business
   name: Business
   news_count: 5
@@ -86,11 +86,11 @@ sections:
   - news
   schedule_enabled: true
   schedule_hour: 22
-  schedule_minute: 20
-  google_topic: BUSINESS
+  schedule_minute: 15
   rss_feeds:
   - https://feeds.bbci.co.uk/news/business/rss.xml
   - https://search.cnbc.com/rs/search/view.html?partnerId=2000&keywords=business&f=1&c=1&sort=date
+  google_topic: BUSINESS
 - code: gaming
   name: Gaming
   news_count: 5
@@ -104,12 +104,12 @@ sections:
   - news
   schedule_enabled: true
   schedule_hour: 22
-  schedule_minute: 25
-  search_query: video games OR gaming OR PlayStation OR Xbox OR Nintendo OR Steam
+  schedule_minute: 15
   rss_feeds:
   - https://www.polygon.com/rss/index.xml
   - https://www.eurogamer.net/feed
   - https://feeds.ign.com/ign/all
+  search_query: video games OR gaming OR PlayStation OR Xbox OR Nintendo OR Steam
 - code: us
   name: US
   news_count: 5
@@ -123,11 +123,11 @@ sections:
   - news
   schedule_enabled: true
   schedule_hour: 22
-  schedule_minute: 25
-  google_topic: NATION
+  schedule_minute: 15
   rss_feeds:
   - https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml
   - https://feeds.npr.org/1003/rss.xml
+  google_topic: NATION
 - code: uk
   name: UK
   news_count: 5
@@ -141,10 +141,10 @@ sections:
   - news
   schedule_enabled: true
   schedule_hour: 22
-  schedule_minute: 30
-  google_topic: NATION
+  schedule_minute: 15
   rss_feeds:
   - https://feeds.bbci.co.uk/news/uk/rss.xml
+  google_topic: NATION
 - code: cyprus
   name: Cyprus
   news_count: 5
@@ -158,10 +158,10 @@ sections:
   schedule_enabled: true
   schedule_hour: 22
   schedule_minute: 15
-  search_query: Cyprus OR Cypriot OR Nicosia OR Limassol
   rss_feeds:
   - https://cyprus-mail.com/feed/
   - https://in-cyprus.philenews.com/feed/
+  search_query: Cyprus OR Cypriot OR Nicosia OR Limassol
 - code: india
   name: India
   news_count: 5
@@ -172,10 +172,10 @@ sections:
   - shorts
   - india
   - news
-  schedule_enabled: false
+  schedule_enabled: true
   schedule_hour: 22
-  schedule_minute: 30
-  google_topic: NATION
+  schedule_minute: 15
   rss_feeds:
   - https://www.thehindu.com/news/national/feeder/default.rss
   - https://indianexpress.com/feed/
+  google_topic: NATION
