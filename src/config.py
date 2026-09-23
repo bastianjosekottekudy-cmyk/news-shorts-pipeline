@@ -73,6 +73,7 @@ class Section:
     google_topic: str = ""
     search_query: str = ""
     rss_url: str = ""
+    rss_feeds: list[str] = field(default_factory=list)
     youtube_tags: list[str] = field(default_factory=list)
     schedule_enabled: bool = True
     schedule_hour: int = DEFAULT_SCHEDULE_HOUR
@@ -140,6 +141,10 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
     raw.setdefault("google_topic", "")
     raw.setdefault("search_query", "")
     raw.setdefault("rss_url", "")
+    feeds = raw.get("rss_feeds") or []
+    if not isinstance(feeds, list):
+        feeds = [str(feeds)]
+    raw["rss_feeds"] = [str(u).strip() for u in feeds if str(u).strip()]
     tags = raw.get("youtube_tags") or []
     if not isinstance(tags, list):
         tags = [str(tags)]
@@ -174,6 +179,8 @@ def _dump_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "schedule_hour": raw["schedule_hour"],
         "schedule_minute": raw["schedule_minute"],
     }
+    if raw.get("rss_feeds"):
+        out["rss_feeds"] = raw["rss_feeds"]
     rss = str(raw.get("rss_url") or "").strip()
     query = str(raw.get("search_query") or "").strip()
     topic = str(raw.get("google_topic") or "").strip().upper()

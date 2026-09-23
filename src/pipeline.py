@@ -37,7 +37,35 @@ logger = logging.getLogger(__name__)
 def _youtube_enabled() -> bool:
     from src.youtube.uploader import youtube_enabled
 
-    return youtube_enabled()
+def _cleanup_run_media(run_id: int, video_path: str) -> None:
+    try:
+        p = Path(video_path)
+        run_dir = p.parent
+        if run_dir.is_dir() and run_dir.name.startswith("run_"):
+            shutil.rmtree(run_dir, ignore_errors=True)
+            logger.info("Deleted local run directory after upload for run %s: %s", run_id, run_dir)
+            store.append_step_log(run_id, "cleanup", f"Deleted local run folder: {run_dir.name}")
+            for parent in (run_dir.parent, run_dir.parent.parent):
+                try:
+                    if parent.is_dir() and parent.resolve() != OUTPUT_DIR.resolve():
+                        if not any(parent.iterdir()):
+                            parent.rmdir()
+                except OSError:
+                    pass
+        elif p.is_file():
+            p.unlink(missing_ok=True)
+            logger.info("Deleted local video after upload for run %s: %s", run_id, video_path)
+            store.append_step_log(run_id, "cleanup", f"Deleted local video: {p.name}")
+        store.mark_run_dashboard_deleted(run_id)
+        logger.info("Removed uploaded run %s from dashboard", run_id)
+        store.append_step_log(run_id, "cleanup", "Deleted uploaded item from dashboard")
+    except Exception as del_exc:
+        logger.warning(
+            "Failed to delete local video/dashboard item for run %s (%s): %s",
+            run_id,
+            video_path,
+            del_exc,
+        )
 
 
 def _attempt_youtube_upload(
@@ -104,48 +132,7 @@ def _attempt_youtube_upload(
                 run_id=run_id,
             )
         if should_delete_after_upload(delete_after_upload):
-            try:
-                p = Path(video_path)
-                run_dir = p.parent
-                if run_dir.is_dir() and run_dir.name.startswith("run_"):
-                    shutil.rmtree(run_dir, ignore_errors=True)
-                    logger.info(
-                        "Deleted local run directory after upload for run %s: %s",
-                        run_id,
-                        run_dir,
-                    )
-                    store.append_step_log(
-                        run_id, "cleanup", f"Deleted local run folder: {run_dir.name}"
-                    )
-                    for parent in (run_dir.parent, run_dir.parent.parent):
-                        try:
-                            if parent.is_dir() and parent.resolve() != OUTPUT_DIR.resolve():
-                                if not any(parent.iterdir()):
-                                    parent.rmdir()
-                        except OSError:
-                            pass
-                elif p.is_file():
-                    p.unlink()
-                    logger.info(
-                        "Deleted local video after upload for run %s: %s",
-                        run_id,
-                        video_path,
-                    )
-                    store.append_step_log(
-                        run_id, "cleanup", f"Deleted local video: {p.name}"
-                    )
-                store.mark_run_dashboard_deleted(run_id)
-                logger.info("Removed uploaded run %s from dashboard", run_id)
-                store.append_step_log(
-                    run_id, "cleanup", "Deleted uploaded item from dashboard"
-                )
-            except Exception as del_exc:
-                logger.warning(
-                    "Failed to delete local video/dashboard item for run %s (%s): %s",
-                    run_id,
-                    video_path,
-                    del_exc,
-                )
+            _cleanup_run_media(run_id, video_path)
         return youtube_id
     except JobStoppedError:
         store.set_upload_status(run_id, "none", upload_error=None)
@@ -299,27 +286,8 @@ def run_single_short(
         store.update_run(run_id, video_path=video_path)
 
         check_stop(run_id, section.code)
-        youtube_id = None
-        should_upload = force_upload or (not skip_upload and _youtube_enabled())
-        if should_upload:
-            youtube_id = _attempt_youtube_upload(
-                run_id,
-                video_path,
-                section,
-                news_items,
-                run_date,
-                index=index,
-                total=total,
-                delete_after_upload=delete_after_upload,
-                force_upload=force_upload,
-            )
-        else:
-            store.append_step_log(
-                run_id,
-                "local",
-                f"Saved as '{video_title}.mp4' — upload from dashboard or enable auto-upload",
-            )
 
+        # Write initial manifest prior to upload while output_dir is guaranteed intact
         manifest: dict[str, Any] = {
             "run_id": run_id,
             "batch_id": batch_id,
@@ -331,25 +299,72 @@ def run_single_short(
             "script_path": script_path,
             "video_title": video_title,
             "video_path": video_path,
-            "youtube_video_id": youtube_id,
-            "video_deleted": bool(youtube_id and not Path(video_path).is_file()),
+            "youtube_video_id": None,
+            "video_deleted": False,
         }
-        (output_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
+        try:
+            (output_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8"
+            )
+        except Exception as m_exc:
+            logger.warning("Could not write initial manifest.json for run %s: %s", run_id, m_exc)
+
+        youtube_id = None
+        should_upload = force_upload or (not skip_upload and _youtube_enabled())
+        if should_upload:
+            youtube_id = _attempt_youtube_upload(
+                run_id,
+                video_path,
+                section,
+                news_items,
+                run_date,
+                index=index,
+                total=total,
+                delete_after_upload=False,  # Defer cleanup until run is finalized as success
+                force_upload=force_upload,
+            )
+        else:
+            store.append_step_log(
+                run_id,
+                "local",
+                f"Saved as '{video_title}.mp4' — upload from dashboard or enable auto-upload",
+            )
+
+        manifest["youtube_video_id"] = youtube_id
+        manifest["video_deleted"] = bool(youtube_id and not Path(video_path).is_file())
+        if output_dir.is_dir():
+            try:
+                (output_dir / "manifest.json").write_text(
+                    json.dumps(manifest, indent=2), encoding="utf-8"
+                )
+            except Exception as m_exc:
+                logger.warning("Could not update manifest.json for run %s: %s", run_id, m_exc)
 
         store.append_step_log(run_id, "done", "Short completed successfully")
         store.finish_run(run_id, "success")
+
+        # Post-completion media cleanup if delete_after_upload is enabled
         if should_upload and should_delete_after_upload(delete_after_upload):
             curr_run = store.get_run(run_id)
             if curr_run and curr_run.get("upload_status") == "uploaded":
-                store.mark_run_dashboard_deleted(run_id)
+                _cleanup_run_media(run_id, video_path)
+
         return run_id
     except JobStoppedError as exc:
         logger.info("Short run %s stopped: %s", run_id, exc)
         store.stop_run(run_id, reason=str(exc))
         return run_id
     except Exception as exc:
+        curr = store.get_run(run_id)
+        if curr and (curr.get("upload_status") == "uploaded" or curr.get("youtube_video_id")):
+            logger.warning(
+                "Short run %s encountered post-upload error: %s; preserving success status",
+                run_id,
+                exc,
+            )
+            store.append_step_log(run_id, "warning", f"Post-upload warning: {exc}")
+            store.finish_run(run_id, "success")
+            return run_id
         logger.exception("Short run %s failed: %s", run_id, exc)
         store.append_step_log(run_id, "error", str(exc))
         store.finish_run(run_id, "failed", error_message=str(exc))
@@ -383,8 +398,7 @@ def run_section_batch(
         count if count is not None else int(section.news_count)
     )
     fetch_n = max(1, int(fetch_n))
-    # Always exactly one Short per section covering all fetched headlines
-    _ = shorts_count  # ignored; kept for CLI back-compat
+    target_shorts = max(1, int(shorts_count or 1))
     batch_id = batch_id if batch_id is not None else store.next_batch_id()
     mock_images = news_provider == "mock"
 
@@ -392,10 +406,11 @@ def run_section_batch(
     batch_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(
-        "Batch %s for %s: fetching %s headlines → 1 Short",
+        "Batch %s for %s: fetching %s headlines → %s Short(s)",
         batch_id,
         section.code,
         fetch_n,
+        target_shorts,
     )
     check_stop(existing_run_id, section.code)
     try:
@@ -419,18 +434,43 @@ def run_section_batch(
     check_stop(existing_run_id, section.code)
     run_ids: list[int] = []
     try:
-        rid = run_single_short(
-            section,
-            news_items,
-            run_date=run_date,
-            batch_id=batch_id,
-            skip_upload=skip_upload,
-            force_upload=force_upload,
-            delete_after_upload=delete_after_upload,
-            mock_images=mock_images,
-            existing_run_id=existing_run_id,
-        )
-        run_ids.append(rid)
+        if target_shorts > 1 and len(news_items) >= target_shorts:
+            chunk_size = max(1, len(news_items) // target_shorts)
+            for s_idx in range(target_shorts):
+                chunk = (
+                    news_items[s_idx * chunk_size : (s_idx + 1) * chunk_size]
+                    if s_idx < target_shorts - 1
+                    else news_items[s_idx * chunk_size :]
+                )
+                if not chunk:
+                    continue
+                rid = run_single_short(
+                    section,
+                    chunk,
+                    run_date=run_date,
+                    batch_id=batch_id,
+                    skip_upload=skip_upload,
+                    force_upload=force_upload,
+                    delete_after_upload=delete_after_upload,
+                    mock_images=mock_images,
+                    existing_run_id=existing_run_id if s_idx == 0 else None,
+                    index=s_idx + 1,
+                    total=target_shorts,
+                )
+                run_ids.append(rid)
+        else:
+            rid = run_single_short(
+                section,
+                news_items,
+                run_date=run_date,
+                batch_id=batch_id,
+                skip_upload=skip_upload,
+                force_upload=force_upload,
+                delete_after_upload=delete_after_upload,
+                mock_images=mock_images,
+                existing_run_id=existing_run_id,
+            )
+            run_ids.append(rid)
     except JobStoppedError:
         logger.info("Batch %s for section %s stopped by user", batch_id, section.code)
         if existing_run_id:
@@ -439,11 +479,20 @@ def run_section_batch(
     except Exception as exc:
         logger.exception("Failed short in batch %s", batch_id)
         if existing_run_id:
-            store.finish_run(existing_run_id, "failed", error_message=str(exc))
+            curr = store.get_run(existing_run_id)
+            if curr and (curr.get("upload_status") == "uploaded" or curr.get("youtube_video_id")):
+                store.finish_run(existing_run_id, "success")
+                run_ids.append(existing_run_id)
+            else:
+                store.finish_run(existing_run_id, "failed", error_message=str(exc))
 
     if not run_ids:
         if job_control.is_stop_requested(existing_run_id, section.code):
             return run_ids
+        if existing_run_id:
+            curr = store.get_run(existing_run_id)
+            if curr and (curr.get("upload_status") == "uploaded" or curr.get("youtube_video_id")):
+                return [existing_run_id]
         raise RuntimeError(f"Short failed for section {section.code}")
     logger.info(
         "Batch %s complete for %s: 1 Short from %s headlines",
