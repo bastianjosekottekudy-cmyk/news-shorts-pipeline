@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 def _youtube_enabled() -> bool:
     from src.youtube.uploader import youtube_enabled
 
+    return youtube_enabled()
+
+
 def _cleanup_run_media(run_id: int, video_path: str) -> None:
     try:
         p = Path(video_path)
