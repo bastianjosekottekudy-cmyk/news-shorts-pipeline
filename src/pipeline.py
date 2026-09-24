@@ -25,7 +25,7 @@ from src import job_control
 from src.job_control import JobStoppedError, check_stop, register_run, unregister_run
 from src.images.fetcher import fetch_images_for_news
 from src.images.keywords import enrich_news_with_image_queries
-from src.naming import build_video_title
+from src.naming import build_video_title, sanitize_news_title
 from src.news.fetcher import fetch_section_news
 from src.script.generator import generate_script
 from src.titles.clarity import clarify_news_titles, generate_display_title
