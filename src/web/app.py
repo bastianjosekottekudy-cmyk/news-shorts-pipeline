@@ -922,9 +922,6 @@ async def api_upload_run(run_id: int, background_tasks: BackgroundTasks) -> JSON
         raise HTTPException(status_code=409, detail="Upload already in progress")
     if run.get("upload_status") == "uploaded" and run.get("youtube_video_id") and run.get("youtube_video_id") != "skipped":
         raise HTTPException(status_code=409, detail="This topic/short has already been uploaded to YouTube.")
-    title = str(run.get("news_title") or "").strip()
-    if title and store.is_topic_uploaded(title):
-        raise HTTPException(status_code=409, detail=f"Topic '{title}' has already been uploaded to YouTube.")
 
     with _upload_lock:
         if run_id in _uploading_runs:

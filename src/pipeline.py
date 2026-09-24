@@ -99,12 +99,6 @@ def _attempt_youtube_upload(
             logger.info("Run %s already uploaded as %s; skipping re-upload", run_id, run.get("youtube_video_id"))
             return str(run.get("youtube_video_id"))
 
-        if primary_title and store.is_topic_uploaded(primary_title):
-            logger.warning("Topic/headline %r already uploaded to YouTube; skipping re-upload for run %s", primary_title, run_id)
-            store.set_upload_status(run_id, "none", upload_error=None)
-            store.append_step_log(run_id, "upload", f"Topic '{primary_title}' already uploaded to YouTube; skipped re-upload")
-            return None
-
     store.set_upload_status(run_id, "uploading", upload_error=None)
     store.append_step_log(run_id, "upload", "Uploading Short to YouTube")
     check_stop(run_id, section.code)
@@ -126,14 +120,17 @@ def _attempt_youtube_upload(
         store.append_step_log(
             run_id, "upload", f"Uploaded https://www.youtube.com/watch?v={youtube_id}"
         )
-        if primary_title:
-            store.record_uploaded_topic(
-                topic=primary_title,
-                section_code=section.code,
-                news_title=primary_title,
-                news_link=primary_link,
-                run_id=run_id,
-            )
+        for item in news_items:
+            h = sanitize_news_title(str(item.get("title") or ""))
+            l = str(item.get("resolved_link") or item.get("link") or "").strip()
+            if h:
+                store.record_uploaded_topic(
+                    topic=h,
+                    section_code=section.code,
+                    news_title=h,
+                    news_link=l,
+                    run_id=run_id,
+                )
         if should_delete_after_upload(delete_after_upload):
             _cleanup_run_media(run_id, video_path)
         return youtube_id
@@ -183,6 +180,18 @@ def run_single_short(
         news_items = [news_items]
     if not news_items:
         raise ValueError("news_items required")
+
+    if index is None:
+        try:
+            existing_same_day = [
+                r for r in store.list_runs(section_code=section.code, run_date=run_date)
+                if r.get("upload_status") == "uploaded" and r.get("id") != existing_run_id
+            ]
+            if existing_same_day:
+                index = len(existing_same_day) + 1
+                total = index
+        except Exception:
+            pass
 
     video_title = build_video_title(
         section.name, run_date, index=index, total=total
