@@ -179,3 +179,17 @@ sections:
   - https://www.thehindu.com/news/national/feeder/default.rss
   - https://indianexpress.com/feed/
   google_topic: NATION
+- code: gta-6
+  name: GTA 6
+  news_count: 5
+  language: en
+  region: US
+  timezone: Asia/Kolkata
+  youtube_tags:
+  - shorts
+  - gta-6
+  - news
+  schedule_enabled: true
+  schedule_hour: 22
+  schedule_minute: 15
+  search_query: GTA 6 OR Grand Theft Auto VI
